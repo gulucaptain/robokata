@@ -13,6 +13,7 @@ from .distributed.util import _configure_model, dist_mean, dist_max
 from .modules.utils import load_transformer, resolve_model_component
 from .utils import logger, get_mesh_id, sample_timestep_id, data_seq_to_patch, warmup_constant_lambda, FlowMatchScheduler
 from .mcp import validate_mcp_settings, shift_latents_for_mcp
+from .semantic_ifp import semantic_ifp_losses
 
 def _safe_mean(tensor):
     return tensor.sum() / max(tensor.numel(), 1)
@@ -34,6 +35,7 @@ class Trainer:
         self.dtype = config.param_dtype
         self.patch_size = config.patch_size
         self.enable_mcp = getattr(config, 'enable_mcp', True)
+        self.semantic_ifp = config.get('ig_semantic_ifp')
         if int(config.batch_size) < 1 or (config.ig_sampling_mode == "episode" and int(config.batch_size) != 1):
             raise ValueError(
                 "Zero-WAM ICL training requires batch_size=1 per rank"
@@ -122,7 +124,7 @@ class Trainer:
         self.train_scheduler_action = FlowMatchScheduler(shift=self.config.action_snr_shift, sigma_min=0.0, extra_one_step=True)
         self.train_scheduler_action.set_timesteps(1000, training=True)
         self.train_scheduler_mcp = None
-        if self.enable_mcp:
+        if self.enable_mcp and not self.semantic_ifp:
             self.train_scheduler_mcp = FlowMatchScheduler(
                 shift=self.config.mcp_snr_shift,
                 sigma_min=0.0,
@@ -298,7 +300,7 @@ class Trainer:
             'max_frame_chunk_size': int(self.config.max_frame_chunk_size),
             'window_size': window_size,
         }
-        if self.enable_mcp:
+        if self.enable_mcp and not self.semantic_ifp:
             mcp_latent_dicts = []
             for module_index in range(self.config.num_mcp_modules):
                 future_chunk_offset = (
@@ -379,6 +381,18 @@ class Trainer:
             * action_loss_weight[:, None, :, None, None]
             * input_dict['action_dict']['actions_mask'].float()
         )
+
+        if self.semantic_ifp:
+            losses = semantic_ifp_losses(
+                mcp_pred_list, input_dict["semantic_ifp_features"], input_dict["semantic_ifp_valid"],
+                input_dict["chunk_size"], self.config.future_chunk_stride,
+            )
+            scale = self.semantic_ifp["weight"] / self.gradient_accumulation_steps
+            return (
+                latent_loss / self.gradient_accumulation_steps,
+                action_loss / self.gradient_accumulation_steps,
+                [loss * scale for loss in losses],
+            )
 
         mcp_losses = []
         for mcp_pred, mcp_latent_dict in zip(

@@ -23,17 +23,21 @@ def demo_ids(plan):
 
 
 def sampled_video(path, expected_frames):
+    # Sample the midpoint of each temporal segment from external camera 0.
+    indices = ((np.arange(FRAMES) + 0.5) * expected_frames / FRAMES).astype(int)
+    return read_external_rgb(path, expected_frames, indices)
+
+
+def read_external_rgb(path, expected_frames, indices):
     with np.load(path, allow_pickle=False) as data:
         rgb = data["rgb"]
     if rgb.shape != (expected_frames, 2, 224, 224, 3) or rgb.dtype != np.uint8:
         raise ValueError(f"Unexpected RoboICL video format: {path}")
-    # Sample the midpoint of each temporal segment from external camera 0.
-    indices = ((np.arange(FRAMES) + 0.5) * expected_frames / FRAMES).astype(int)
     return torch.from_numpy(rgb[indices, 0])
 
 
 @torch.inference_mode()
-def encode(model, frames):
+def encode_patches(model, frames):
     pixels = frames.permute(0, 3, 1, 2).to(device=model.device, dtype=torch.float32) / 255
     pixels = F.interpolate(pixels, (SIZE, SIZE), mode="bilinear", align_corners=False, antialias=True)
     mean = pixels.new_tensor([0.485, 0.456, 0.406]).view(1, 3, 1, 1)
@@ -41,12 +45,25 @@ def encode(model, frames):
     patches = model(pixel_values=(pixels - mean) / std).last_hidden_state[:, 1:]
     side = SIZE // model.config.patch_size
     patches = patches.transpose(1, 2).reshape(len(frames), 768, side, side)
-    visual = F.adaptive_avg_pool2d(patches, GRID).flatten(2).transpose(1, 2).cpu()
-    visual = visual.reshape(-1, FRAMES, GRID**2, 768)
+    return F.adaptive_avg_pool2d(patches, GRID).flatten(2).transpose(1, 2).cpu()
+
+
+@torch.inference_mode()
+def encode(model, frames):
+    visual = encode_patches(model, frames).reshape(-1, FRAMES, GRID**2, 768)
     batch = len(visual)
     time = torch.eye(FRAMES).view(1, FRAMES, 1, FRAMES).expand(batch, -1, GRID**2, -1)
     space = torch.eye(GRID**2).view(1, 1, GRID**2, GRID**2).expand(batch, FRAMES, -1, -1)
     return torch.cat([visual, time, space], dim=-1).reshape(batch, TOKEN_COUNT, FEATURE_DIM).half()
+
+
+def load_encoder(path, device):
+    from transformers import Dinov2Model
+
+    model = Dinov2Model.from_pretrained(path, local_files_only=True).to(device)
+    if (model.config.hidden_size, model.config.patch_size) != (768, 14):
+        raise ValueError("Expected a DINOv2 ViT-B/14 encoder")
+    return model.eval().requires_grad_(False)
 
 
 def load_features(path, work, plan):
@@ -117,12 +134,7 @@ def main():
         merge_shards(output, ids, contract, args.shards, atomic_torch_save)
         print(f"Merged {len(ids)} demos into {output}")
         return
-    from transformers import Dinov2Model
-
-    model = Dinov2Model.from_pretrained(args.encoder, local_files_only=True).to(device)
-    model.eval().requires_grad_(False)
-    if (model.config.hidden_size, model.config.patch_size) != (768, 14):
-        raise ValueError("Expected the locally installed DINOv2 ViT-B/14")
+    model = load_encoder(args.encoder, device)
     root = Path(plan["source_root"])
     selected = ids[args.shard or 0 :: args.shards]
     if args.smoke:

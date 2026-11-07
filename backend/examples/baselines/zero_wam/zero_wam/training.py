@@ -506,6 +506,9 @@ def log_update(trainer, values):
             shapes=trainer.ig_latest_shape,
             updated_at=datetime.now(timezone.utc).isoformat(),
         )
+        if trainer.config.get("ig_semantic_ifp"):
+            row["semantic_ifp_loss"] = values["mcp"]
+            row["semantic_ifp_depth_losses"] = values["mcp_depths"]
         run = Path(trainer.config.save_root)
         with (run / "loss.jsonl").open("a") as handle:
             handle.write(json.dumps(row) + "\n")

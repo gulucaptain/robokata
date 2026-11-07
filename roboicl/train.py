@@ -180,26 +180,68 @@ def resume_progress(checkpoint, config, samples_per_epoch):
 
 
 def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
-                   demo_cache=None, demo_dropout=0.3):
+                   demo_cache=None, demo_dropout=0.3, initialize_from_a=False,
+                   semantic_cache=None, semantic_weight=0.5):
     native_config = training.native_config
     prepare_episode = training.prepare_episode
     atomic_json = training.atomic_json
     setup_data = training.setup_data
     adapt_transformer = training.adapt_transformer
     buckets = length_buckets(plan) if batch_per_gpu > 1 else None
+    if semantic_cache is not None:
+        from semantic_features import DIM, GRID, SCHEMA, load_query_features
+        from examples.baselines.zero_wam.zero_wam.wan_va.semantic_ifp import (
+            SemanticIFPHead, future_anchor_pairs,
+        )
+
+        semantic_digest = sha256(semantic_cache)
+        query_rows, targets, target_valid, semantic_encoder = load_query_features(semantic_cache, work, plan)
+        pair_rows = torch.tensor([query_rows[pair["query"]] for pair in plan["pairs"]["train"]])
     if demo_cache is not None:
         from demo_attention import SPEC, add_to_adapter_report, attach_demo_attention
         from demo_features import load_features
 
         cache_digest = sha256(demo_cache)
         feature_ids, features = load_features(demo_cache, work, plan)
+        if semantic_cache is not None:
+            demo_encoder = torch.load(demo_cache, map_location="cpu", weights_only=True, mmap=True)
+            if demo_encoder["encoder_sha256"] != semantic_encoder:
+                raise ValueError("A and B must use the same DINOv2 checkpoint")
         train_demos = sorted({pair["demo"] for pair in plan["pairs"]["train"]})
         demo_rows = torch.tensor([feature_ids[episode] for episode in train_demos])
 
         def adapt_with_demo(model, config):
-            report = adapt_transformer(model, config)
+            init_path = config.ig_initialization if initialize_from_a else None
+            report = adapt_transformer(
+                model, {**config, "ig_initialization": None} if init_path else config
+            )
             attach_demo_attention(model, SPEC)
             add_to_adapter_report(model, report)
+            if init_path:
+                checkpoint = torch.load(init_path, map_location="cpu", weights_only=False, mmap=True)
+                weights = checkpoint["adapter_state_dict"]
+                if ({name: list(tensor.shape) for name, tensor in weights.items()}
+                        != report["trainable_shapes"]):
+                    raise ValueError("Version A warm-start weights do not match the trainable parameters")
+                model.load_state_dict(weights, strict=False)
+                report["initialized_from"] = init_path
+            if semantic_cache is not None:
+                retired = ("mcp_blocks.", "mcp_projections.")
+                report["lora_parameters"] -= sum(
+                    p.numel() for name, p in model.named_parameters()
+                    if p.requires_grad and name.startswith(retired)
+                )
+                report["lora_targets"] = [
+                    name for name in report["lora_targets"] if not name.startswith(retired)
+                ]
+                del model.mcp_blocks
+                del model.mcp_projections
+                model.semantic_ifp = SemanticIFPHead(model.inner_dim, config.num_mcp_modules, DIM, GRID)
+                report["trainable_shapes"] = {
+                    name: list(p.shape) for name, p in model.named_parameters() if p.requires_grad
+                }
+                report["semantic_ifp_parameters"] = sum(p.numel() for p in model.semantic_ifp.parameters())
+                report["trainable_parameters"] = sum(p.numel() for p in model.parameters() if p.requires_grad)
             return report
 
         training.adapt_transformer = adapt_with_demo
@@ -251,6 +293,9 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
             settings.ig_demo_attention = SPEC
             settings.ig_demo_cache_sha256 = cache_digest
             settings.ig_demo_dropout = demo_dropout
+        if semantic_cache is not None:
+            settings.ig_semantic_ifp = {"schema": SCHEMA, "weight": semantic_weight}
+            settings.ig_semantic_ifp_cache_sha256 = semantic_digest
         return settings
 
     def prepare_with_accumulation(trainer, batch, original):
@@ -261,6 +306,19 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
             keep = torch.rand((len(demo), 1, 1), device=demo.device) >= demo_dropout
             # A dropped demo has zero K/V under the bias-free projections.
             inputs["demo_features"] = demo * keep
+        if semantic_cache is not None:
+            rows = pair_rows[batch["ig_sample_index"].cpu()]
+            frames = batch["latents"].shape[2]
+            valid = target_valid[rows, :frames]
+            inputs["semantic_ifp_features"] = targets[rows, :frames].to(trainer.device)
+            inputs["semantic_ifp_valid"] = valid.to(trainer.device)
+            trainer.ig_latest_shape["semantic_ifp_valid_frames"] = [
+                mask.sum(1).tolist()
+                for _, mask in future_anchor_pairs(
+                    valid, trainer.config.num_mcp_modules,
+                    inputs["chunk_size"], trainer.config.future_chunk_stride,
+                )
+            ]
         trainer.ig_group_count = trainer.config.ig_effective_batch
         return inputs
 
@@ -280,6 +338,9 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
                          else "none; drop epoch tail of fewer than 16 pairs"),
                 normalization="unique training query recordings only",
             )
+            if semantic_cache is not None:
+                value["targets"] = "video/action flow-matching and future query DINO cosine loss"
+                value["mcp_source"] = "real query VAE anchors from the verified training split"
         return atomic_json(path, value)
 
     cache.require_complete = lambda config: plan
@@ -306,9 +367,11 @@ def main():
     parser.add_argument("--num-workers", default=2, type=int)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--resume-from", type=Path)
-    parser.add_argument("--initialize-from", type=Path, help="Warm-start from a baseline adapter checkpoint")
+    parser.add_argument("--initialize-from", type=Path, help="Warm-start from a baseline or A adapter checkpoint")
     parser.add_argument("--demo-features", type=Path, help="Enable A using the precomputed DINOv2 cache")
     parser.add_argument("--demo-dropout", type=float, default=0.3)
+    parser.add_argument("--semantic-features", type=Path, help="Replace latent MCP with B1 query DINO targets")
+    parser.add_argument("--semantic-weight", type=float, default=0.5)
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     world = int(os.environ.get("WORLD_SIZE", "1"))
@@ -322,12 +385,18 @@ def main():
         parser.error("--max-steps must be positive")
     if not 0 <= args.demo_dropout < 1:
         parser.error("--demo-dropout must be in [0, 1)")
+    if args.semantic_features and not args.demo_features:
+        parser.error("--semantic-features requires --demo-features for A+B")
+    if not math.isfinite(args.semantic_weight) or args.semantic_weight <= 0:
+        parser.error("--semantic-weight must be finite and positive")
     os.environ.setdefault("WORLD_SIZE", str(world))
     work, model = args.work.resolve(), args.model.resolve()
     plan, receipt = verified_plan(work, model)
     if len(plan["pairs"]["train"]) < GLOBAL_BATCH:
         parser.error("need at least 16 training pairs")
     demo_cache = args.demo_features.resolve() if args.demo_features else None
+    semantic_cache = args.semantic_features.resolve() if args.semantic_features else None
+    initialize_from_a = False
     checkpoint_path = args.resume_from or args.initialize_from
     if checkpoint_path is not None:
         checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=False, mmap=True)
@@ -337,13 +406,26 @@ def main():
         ):
             parser.error("Checkpoint uses a different RoboICL cache or base model")
         checkpoint_has_demo = "ig_demo_attention" in previous
-        if args.resume_from and checkpoint_has_demo != (demo_cache is not None):
+        checkpoint_has_semantic = "ig_semantic_ifp" in previous
+        if args.resume_from and (
+            checkpoint_has_demo != (demo_cache is not None)
+            or checkpoint_has_semantic != (semantic_cache is not None)
+        ):
             parser.error("Resume with the same Robot-ICL architecture as the checkpoint")
+        if args.initialize_from and checkpoint_has_semantic:
+            parser.error("Use --resume-from for an A+B checkpoint")
         if args.initialize_from and checkpoint_has_demo:
-            parser.error("--initialize-from expects a baseline checkpoint")
+            from demo_attention import SPEC
+
+            if (demo_cache is None or previous["ig_demo_attention"] != SPEC
+                    or previous["ig_demo_cache_sha256"] != sha256(demo_cache)):
+                parser.error("A warm-start requires the same demo architecture and feature cache")
+            initialize_from_a = True
         del checkpoint
     install_bridge(work, plan, receipt, args.max_steps, args.batch_per_gpu,
-                   demo_cache=demo_cache, demo_dropout=args.demo_dropout)
+                   demo_cache=demo_cache, demo_dropout=args.demo_dropout,
+                   initialize_from_a=initialize_from_a,
+                   semantic_cache=semantic_cache, semantic_weight=args.semantic_weight)
     training.run(RoboICLConfig(
         model_path=str(model),
         empty_text_embedding=str(args.empty_text.resolve()),

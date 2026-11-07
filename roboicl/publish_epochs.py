@@ -1,4 +1,4 @@
-"""Publish completed RoboICL Version A epoch adapters to a public model repo."""
+"""Publish completed RoboICL A or A+B1 epoch adapters to a public model repo."""
 
 import argparse
 import json
@@ -56,6 +56,28 @@ the corresponding training checkpoint is saved. Closed-loop performance
 has not been measured for these snapshots.
 """
 
+B1_CARD = """---
+library_name: pytorch
+base_model: Robbyant-Research/zero-wam-pretrain
+tags:
+- robotics
+- roboicl
+- zero-wam
+- lora
+---
+
+# Robot-ICL + A+B1
+
+B1 replaces latent MCP denoising with a training-only semantic prediction
+objective on frozen DINOv2 targets at future query latent anchors.
+Inference uses the Version A architecture with the matching Zero-WAM base
+model and Robot-ICL + A integration.
+
+Each epoch folder contains the adapter tensors in Safetensors and an
+upload receipt with their SHA-256. Closed-loop performance has not been
+measured for these snapshots.
+"""
+
 
 def json_bytes(value):
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
@@ -77,6 +99,7 @@ def adapter_contract(settings):
         "icl_rope_h": settings["icl_rope_h"],
         "enable_mcp": settings["enable_mcp"],
         "effective_batch": settings["ig_effective_batch"],
+        "semantic_ifp": settings.get("ig_semantic_ifp"),
     }
 
 
@@ -120,6 +143,8 @@ def main():
     torch.set_num_threads(2)
     settings = read_json(args.run / "config.json")
     config = adapter_contract(settings)
+    version = "A+B1" if config["semantic_ifp"] else "A"
+    card = B1_CARD if config["semantic_ifp"] else CARD
     updates = read_json(args.run / "sampling_contract.json")["updates_per_epoch"]
     epochs = settings["ig_total_epochs"]
     args.state_dir.mkdir(parents=True, exist_ok=True)
@@ -131,8 +156,8 @@ def main():
     if not api.get_paths_info(args.repo, ["README.md"], repo_type="model"):
         api.create_commit(
             repo_id=args.repo,
-            operations=[CommitOperationAdd("README.md", CARD.encode())],
-            commit_message="Document Robot-ICL + A adapter release",
+            operations=[CommitOperationAdd("README.md", card.encode())],
+            commit_message=f"Document Robot-ICL + {version} adapter release",
         )
     print(f"Watching {epochs} epochs in {args.run}; {updates} updates per epoch", flush=True)
     for epoch in range(1, epochs + 1):
@@ -159,7 +184,7 @@ def main():
                                 CommitOperationAdd(destination, weights),
                                 CommitOperationAdd(f"{folder}/adapter.json", json_bytes(receipt)),
                             ],
-                            commit_message=f"Publish Robot-ICL + A epoch {epoch}",
+                            commit_message=f"Publish Robot-ICL + {version} epoch {epoch}",
                         )
                     if remote_weights(api, args.repo, destination) != expected:
                         raise RuntimeError("Hugging Face file size or checksum does not match")

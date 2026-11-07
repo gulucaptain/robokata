@@ -1153,6 +1153,12 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
             self.blocks,
         )
 
+        semantic_ifp = getattr(self, "semantic_ifp", None)
+        if semantic_ifp is not None:
+            frames, height, width = latent["noisy_latents"].shape[-3:]
+            height //= self.patch_size[1]
+            width //= self.patch_size[2]
+
         collected = []
         for layer_index, block in enumerate(self.blocks):
             hs_latent, hs_action = block(
@@ -1166,7 +1172,10 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
                 demo_features=input_dict.get("demo_features"),
             )
             if self.enable_mcp and layer_index in self.mcp_hidden_collect_layers:
-                collected.append(hs_latent[:, : target_length * 2])
+                if semantic_ifp is None:
+                    collected.append(hs_latent[:, : target_length * 2])
+                else:
+                    collected.append(semantic_ifp.pool(hs_latent[:, :target_length], frames, height, width))
 
         latent_output = hs_latent[:, :target_length]
         action_output = hs_action[:, :action_length]
@@ -1192,6 +1201,10 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
             + action_shift
         ).to(action_output.dtype)
         action_output = self.action_proj_out(action_output)
+
+        if semantic_ifp is not None:
+            fused = self.mcp_mlp_hidden(torch.cat(collected, dim=-1))
+            return latent_output, action_output, semantic_ifp(fused)
 
         mcp_outputs = self._forward_training_mcp(
             input_dict=input_dict,

@@ -15,7 +15,7 @@ def apply_ac(model):
     for layer_id, transformer_block in enumerate(model.blocks):
         transformer_block = ptd_checkpoint_wrapper(transformer_block, preserve_rng_state=False)
         model.blocks[layer_id] = transformer_block
-    if getattr(model, 'enable_mcp', False):
+    if getattr(model, 'enable_mcp', False) and hasattr(model, 'mcp_blocks'):
         for group_id, mcp_group in enumerate(model.mcp_blocks):
             for block_id, transformer_block in enumerate(mcp_group):
                 transformer_block = ptd_checkpoint_wrapper(
@@ -48,7 +48,7 @@ def shard_model(model,
         fully_shard(block.ffn, **fsdp_config)
         fully_shard(block, **fsdp_config)
 
-    if getattr(model, 'enable_mcp', False):
+    if getattr(model, 'enable_mcp', False) and hasattr(model, 'mcp_blocks'):
         for mcp_group in model.mcp_blocks:
             for block in mcp_group:
                 fully_shard(block.attn1, **fsdp_config)
