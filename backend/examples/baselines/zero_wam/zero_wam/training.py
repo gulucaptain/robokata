@@ -522,6 +522,7 @@ def log_update(trainer, values):
 
 def install(Trainer):
     native_prepare = Trainer._prepare_input_dict
+    Trainer.prepare_native_input = native_prepare
     Trainer._ig_native_compute_loss = Trainer.compute_loss
     Trainer._prepare_input_dict = lambda self, batch: prepare_episode(self, batch, native_prepare)
     Trainer._get_next_batch = next_batch
