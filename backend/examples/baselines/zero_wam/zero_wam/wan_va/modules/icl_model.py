@@ -28,6 +28,7 @@ from torch.nn.attention.flex_attention import (
     or_masks,
 )
 
+from ..foresight_indexing import KEY_LAYERS
 from .model import WanRotaryPosEmbed, WanTimeTextImageEmbedding
 
 
@@ -521,6 +522,7 @@ class WanICLTransformerBlock(nn.Module):
         update_cache: int = 0,
         cache_name: str = "pos",
         demo_features: Optional[torch.Tensor] = None,
+        demo_log_index: Optional[torch.Tensor] = None,
     ):
         latent_mod = (
             None
@@ -590,7 +592,7 @@ class WanICLTransformerBlock(nn.Module):
             hs_action = hs_action + cross_action
             demo_attention = getattr(self, "demo_attention", None)
             if demo_attention is not None and demo_features is not None:
-                hs_action = demo_attention(hs_action, demo_features)
+                hs_action = demo_attention(hs_action, demo_features, demo_log_index)
             ff_input = (
                 self.action_norm3(hs_action.float()) * (1 + action_mod[4])
                 + action_mod[3]
@@ -737,6 +739,7 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
         self.enable_mcp = False
 
     def clear_cache(self, cache_name: str = "pos") -> None:
+        self.demo_index_cache = {}
         self.type_ids_cache = None
         self.seq_ids_cache = None
         self.frame_ids_cache = None
@@ -759,6 +762,7 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
         self, attn_window: Optional[int] = None, cache_name: str = "pos"
     ) -> None:
         """Drop generated type-1 entries while retaining ICL for the episode."""
+        self.demo_index_cache.pop(cache_name, None)
         if self.cache_type_ids_cache is None:
             return
         keep_icl = self.cache_type_ids_cache == ICL_CACHE_TYPE
@@ -1159,6 +1163,13 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
             height //= self.patch_size[1]
             width //= self.patch_size[2]
 
+        indexing = getattr(self, "foresight_indexing", None)
+        demo = input_dict.get("demo_features")
+        keys = []
+        log_indices = {}
+        if indexing is not None and (semantic_ifp is None or demo is None):
+            raise ValueError("Foresight indexing training requires semantic IFP and demo features")
+
         collected = []
         for layer_index, block in enumerate(self.blocks):
             hs_latent, hs_action = block(
@@ -1169,8 +1180,14 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
                 latent_timestep_proj,
                 action_timestep_proj,
                 rotary_emb,
-                demo_features=input_dict.get("demo_features"),
+                demo_features=demo,
+                demo_log_index=log_indices.pop(layer_index, None),
             )
+            if indexing is not None and layer_index in KEY_LAYERS:
+                clean = hs_latent[:, target_length:2 * target_length]
+                key = indexing.video_key(layer_index, clean, frames, height, width)
+                keys.append(key)
+                log_indices[KEY_LAYERS[layer_index]] = indexing.log_index(key, demo)
             if self.enable_mcp and layer_index in self.mcp_hidden_collect_layers:
                 if semantic_ifp is None:
                     collected.append(hs_latent[:, : target_length * 2])
@@ -1204,7 +1221,10 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
 
         if semantic_ifp is not None:
             fused = self.mcp_mlp_hidden(torch.cat(collected, dim=-1))
-            return latent_output, action_output, semantic_ifp(fused)
+            predictions = semantic_ifp(fused)
+            if indexing is not None:
+                return latent_output, action_output, predictions, keys
+            return latent_output, action_output, predictions
 
         mcp_outputs = self._forward_training_mcp(
             input_dict=input_dict,
@@ -1335,7 +1355,25 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
 
         hs_latent = hidden_states if mode == "video" else None
         hs_action = hidden_states if mode == "action" else None
-        for block in self.blocks:
+        demo = input_dict.get("demo_features")
+        indexing = getattr(self, "foresight_indexing", None)
+        make_index = mode == "video" and bool(update_cache) and indexing is not None and demo is not None
+        read_index = mode == "action" and indexing is not None and demo is not None
+        log_indices = {}
+        if make_index:
+            self.demo_index_cache.pop(cache_name, None)
+            # For packed video CFG, only the first (conditioned) lane feeds action.
+            frames = input_dict["demo_index_frames"]
+            height, width = stream["noisy_latents"].shape[-2:]
+            height //= self.patch_size[1]
+            width //= self.patch_size[2]
+        if read_index:
+            log_indices = self.demo_index_cache.get(cache_name)
+            frames = stream["noisy_latents"].shape[2]
+            if log_indices is None or any(index.shape[1] != frames for index in log_indices.values()):
+                raise RuntimeError("Missing or misaligned video foresight index for the action chunk")
+
+        for layer_index, block in enumerate(self.blocks):
             hs_latent, hs_action = block(
                 hs_latent,
                 hs_action,
@@ -1346,8 +1384,13 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
                 rotary_emb,
                 update_cache=update_cache,
                 cache_name=cache_name,
-                demo_features=input_dict.get("demo_features") if mode == "action" else None,
+                demo_features=demo if mode == "action" else None,
+                demo_log_index=log_indices.get(layer_index),
             )
+            if make_index and layer_index in KEY_LAYERS:
+                clean = hs_latent[:, :frames * height * width]
+                key = indexing.video_key(layer_index, clean, frames, height, width)
+                log_indices[KEY_LAYERS[layer_index]] = indexing.log_index(key, demo)
 
         output_states = hs_latent if mode == "video" else hs_action
         output_table = (
@@ -1372,6 +1415,8 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
 
         if update_cache:
             self._append_metadata(query_type, query_seq, query_frame, cache_types)
+            if make_index:
+                self.demo_index_cache[cache_name] = log_indices
             if clean_window_cache:
                 self.clear_prediction_cache(cache_name=cache_name)
         return output

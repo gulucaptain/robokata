@@ -509,6 +509,9 @@ def log_update(trainer, values):
         if trainer.config.get("ig_semantic_ifp"):
             row["semantic_ifp_loss"] = values["mcp"]
             row["semantic_ifp_depth_losses"] = values["mcp_depths"]
+        if trainer.config.get("ig_foresight_indexing"):
+            row["foresight_key_loss"] = values["key"]
+            row["loss"] += values["key"]
         run = Path(trainer.config.save_root)
         with (run / "loss.jsonl").open("a") as handle:
             handle.write(json.dumps(row) + "\n")

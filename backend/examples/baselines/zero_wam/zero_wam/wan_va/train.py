@@ -4,6 +4,7 @@ from pathlib import Path
 import gc
 import torch
 import torch.distributed as dist
+from torch.distributed.tensor import DTensor, Replicate
 import torch.nn.functional as F
 from tqdm import tqdm
 from einops import rearrange
@@ -13,6 +14,7 @@ from .distributed.util import _configure_model, dist_mean, dist_max
 from .modules.utils import load_transformer, resolve_model_component
 from .utils import logger, get_mesh_id, sample_timestep_id, data_seq_to_patch, warmup_constant_lambda, FlowMatchScheduler
 from .mcp import validate_mcp_settings, shift_latents_for_mcp
+from .foresight_indexing import key_loss
 from .semantic_ifp import semantic_ifp_losses
 
 def _safe_mean(tensor):
@@ -36,6 +38,7 @@ class Trainer:
         self.patch_size = config.patch_size
         self.enable_mcp = getattr(config, 'enable_mcp', True)
         self.semantic_ifp = config.get('ig_semantic_ifp')
+        self.foresight_indexing = config.get('ig_foresight_indexing')
         if int(config.batch_size) < 1 or (config.ig_sampling_mode == "episode" and int(config.batch_size) != 1):
             raise ValueError(
                 "Zero-WAM ICL training requires batch_size=1 per rank"
@@ -443,6 +446,11 @@ class Trainer:
             self.transformer.set_requires_gradient_sync(True)
 
         output = self.transformer(input_dict, train_mode=True)
+        if self.foresight_indexing:
+            *output, keys = output
+            indexing_loss = key_loss(
+                keys, input_dict["semantic_ifp_features"], input_dict["semantic_ifp_valid"],
+            ) * (self.foresight_indexing["key_weight"] / self.gradient_accumulation_steps)
         latent_loss, action_loss, mcp_losses = self.compute_loss(
             input_dict, output)
         mcp_loss = sum(
@@ -451,6 +459,8 @@ class Trainer:
                 self.config.mcp_loss_weights, mcp_losses)
         ) if mcp_losses else latent_loss.new_zeros(())
         loss = latent_loss + action_loss + mcp_loss
+        if self.foresight_indexing:
+            loss = loss + indexing_loss
 
         loss.backward()
 
@@ -460,12 +470,23 @@ class Trainer:
             'mcp_losses': [depth_loss.detach() for depth_loss in mcp_losses],
             'mcp_loss': mcp_loss.detach(),
         }
+        if self.foresight_indexing:
+            losses['key_loss'] = indexing_loss.detach()
 
         # Only update weights after accumulating gradients
         if should_sync:
             max_norm = float(self.config.max_norm)
-            total_norm = torch.nn.utils.clip_grad_norm_(
-                self.transformer.parameters(), max_norm)
+            parameters = [p for p in self.transformer.parameters() if p.grad is not None]
+            total_norm = torch.nn.utils.get_total_norm([p.grad for p in parameters])
+            if isinstance(total_norm, DTensor):
+                # FSDP returns a partial norm. Use one global clip and skip
+                # decision across ranks, including non-finite gradients.
+                total_norm = total_norm.redistribute(
+                    placements=[Replicate()] * total_norm.device_mesh.ndim,
+                )
+            torch.nn.utils.clip_grads_with_norm_(parameters, max_norm, total_norm)
+            if isinstance(total_norm, DTensor):
+                total_norm = total_norm.to_local()
             skip_threshold = (
                 float(self.config.skip_step_grad_norm_multiplier) * max_norm
             )
@@ -518,6 +539,7 @@ class Trainer:
             [] for _ in range(self.config.num_mcp_modules)
         ] if self.enable_mcp else []
         accumulated_mcp_total_losses = []
+        accumulated_key_losses = []
         step_in_accumulation = 0
 
         while self.step < self.config.num_steps:
@@ -532,6 +554,8 @@ class Trainer:
             for depth, mcp_loss in enumerate(losses['mcp_losses']):
                 accumulated_mcp_losses[depth].append(mcp_loss)
             accumulated_mcp_total_losses.append(losses['mcp_loss'])
+            if self.foresight_indexing:
+                accumulated_key_losses.append(losses['key_loss'])
             step_in_accumulation += 1
 
             # Log and checkpoint when optimizer steps
@@ -550,6 +574,12 @@ class Trainer:
                 mcp_total_loss_show = dist_mean(
                     torch.stack(accumulated_mcp_total_losses).sum()
                 ).detach().cpu().item()
+
+                key_loss_show = (
+                    dist_mean(torch.stack(accumulated_key_losses).sum()).item()
+                    if self.foresight_indexing else 0.0
+                )
+                accumulated_key_losses.clear()
 
                 # Clear accumulated losses
                 accumulated_latent_losses = []
@@ -580,6 +610,8 @@ class Trainer:
                         postfix['optimizer_step'] = 'skipped'
                     if self.enable_mcp:
                         postfix['mcp_loss'] = f'{mcp_total_loss_show:.4f}'
+                    if self.foresight_indexing:
+                        postfix['key_loss'] = f'{key_loss_show:.4f}'
                     progress_bar.set_postfix(postfix)
                     if self.config.enable_wandb:
                         log_values = {
@@ -598,11 +630,13 @@ class Trainer:
                                 log_values[
                                     f'loss_metrics/mcp_depth_{depth + 1}'] = (
                                         mcp_loss_show)
+                        if self.foresight_indexing:
+                            log_values['loss_metrics/foresight_key_loss'] = key_loss_show
                         self.wandb.log(log_values, step=self.step)
 
                 self.step += 1
                 ig_bridge.log_update(self, dict(video=latent_loss_show, action=action_loss_show,
-                    mcp=mcp_total_loss_show, mcp_depths=mcp_loss_shows,
+                    mcp=mcp_total_loss_show, mcp_depths=mcp_loss_shows, key=key_loss_show,
                     lr=lr, grad_norm=float(losses["total_norm"].item()),
                     skipped=losses["optimizer_step_skipped"]))
 

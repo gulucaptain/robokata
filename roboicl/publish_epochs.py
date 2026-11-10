@@ -1,4 +1,4 @@
-"""Publish completed RoboICL A or A+B1 epoch adapters to a public model repo."""
+"""Publish completed RoboICL epoch adapters to a public model repo."""
 
 import argparse
 import json
@@ -79,12 +79,33 @@ measured for these snapshots.
 """
 
 
+INDEXED_CARD = """---
+library_name: pytorch
+base_model: Robbyant-Research/zero-wam-pretrain
+tags:
+- robotics
+- roboicl
+- zero-wam
+- lora
+---
+
+# RoboICL + A+B1 + Foresight Indexing
+
+These Safetensors contain RoboICL trainable adapter weights. See
+`adapter_config.json` for the base revision, camera encoding, feature
+schemas, and indexing settings. Each checkpoint has a SHA-256 receipt.
+Load the indicated Zero-WAM base and the matching RoboKata integration.
+The semantic future heads are training-only. The frame key heads, demo
+attention, and indexing parameters are used at inference.
+"""
+
+
 def json_bytes(value):
     return (json.dumps(value, indent=2, sort_keys=True) + "\n").encode()
 
 
 def adapter_contract(settings):
-    return {
+    config = {
         "base_model": BASE,
         "base_model_revision": BASE_REVISION,
         "lora_rank": settings["ig_lora_rank"],
@@ -101,6 +122,16 @@ def adapter_contract(settings):
         "effective_batch": settings["ig_effective_batch"],
         "semantic_ifp": settings.get("ig_semantic_ifp"),
     }
+
+    if settings.get("ig_foresight_indexing"):
+        config.update(
+            foresight_indexing=settings["ig_foresight_indexing"],
+            video_encoding=settings.get("ig_roboicl_encoding", "wan_causal_external_rgb_bf16_mu_v1"),
+            latent_receipt_sha256=settings["ig_roboicl_cache_sha256"],
+            demo_features_sha256=settings["ig_demo_cache_sha256"],
+            query_features_sha256=settings["ig_semantic_ifp_cache_sha256"],
+        )
+    return config
 
 
 def export_epoch(checkpoint_path, weights_path, epoch, updates, config):
@@ -153,18 +184,40 @@ def main():
     api = HfApi()
     if api.whoami()["name"] != args.repo.split("/")[0] or api.model_info(args.repo, token=False).private:
         raise RuntimeError("Expected a public model repository owned by the signed-in user")
-    if not api.get_paths_info(args.repo, ["README.md"], repo_type="model"):
+    indexed = bool(config.get("foresight_indexing"))
+    if indexed:
+        version, card = "A+B1 + Foresight Indexing", INDEXED_CARD
+        files = set(api.list_repo_files(args.repo, repo_type="model"))
+        if "adapter_config.json" in files:
+            remote = api.hf_hub_download(args.repo, "adapter_config.json", repo_type="model")
+            if read_json(Path(remote)) != config:
+                raise ValueError("The remote adapter configuration belongs to another run")
+        elif files - {".gitattributes", "README.md"}:
+            raise ValueError("Use a dedicated model repository for this indexed run")
+        else:
+            api.create_commit(
+                repo_id=args.repo,
+                operations=[
+                    CommitOperationAdd("README.md", card.encode()),
+                    CommitOperationAdd("adapter_config.json", json_bytes(config)),
+                ],
+                commit_message=f"Document Robot-ICL + {version} adapter release",
+            )
+    elif not api.get_paths_info(args.repo, ["README.md"], repo_type="model"):
         api.create_commit(
             repo_id=args.repo,
             operations=[CommitOperationAdd("README.md", card.encode())],
             commit_message=f"Document Robot-ICL + {version} adapter release",
         )
     print(f"Watching {epochs} epochs in {args.run}; {updates} updates per epoch", flush=True)
-    for epoch in range(1, epochs + 1):
+    frequency = settings.get("save_epoch_freq", 1)
+    selected = sorted({*range(frequency, epochs + 1, frequency), epochs})
+    for epoch in selected:
         key = f"{epoch:03d}"
         if key in state:
             continue
-        source = args.run / "checkpoints" / f"epoch_{key}.pt"
+        filename = "final.pt" if epoch == epochs and epoch % frequency else f"epoch_{key}.pt"
+        source = args.run / "checkpoints" / filename
         while not source.is_file():
             time.sleep(15)
         folder = f"epoch-{key}"
@@ -176,7 +229,10 @@ def main():
             attempt = 0
             while True:
                 try:
-                    if remote_weights(api, args.repo, destination) != expected:
+                    current = remote_weights(api, args.repo, destination)
+                    if indexed and current is not None and current != expected:
+                        raise ValueError(f"Existing indexed adapter conflicts: {destination}")
+                    if current != expected:
                         print(f"Uploading epoch {epoch} at step {receipt['global_step']}", flush=True)
                         api.create_commit(
                             repo_id=args.repo,
@@ -189,6 +245,8 @@ def main():
                     if remote_weights(api, args.repo, destination) != expected:
                         raise RuntimeError("Hugging Face file size or checksum does not match")
                     break
+                except ValueError:
+                    raise
                 except Exception as error:
                     attempt += 1
                     print(f"Epoch {epoch} upload attempt {attempt}: {type(error).__name__}", flush=True)

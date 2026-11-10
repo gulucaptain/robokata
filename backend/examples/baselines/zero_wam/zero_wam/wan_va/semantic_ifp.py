@@ -5,18 +5,26 @@ from torch import nn
 from torch.nn import functional as F
 
 
+def pool_video_states(states, frames, height, width, grid, views=1):
+    batch, _, channels = states.shape
+    maps = states.reshape(batch * frames, height, width, channels).permute(0, 3, 1, 2)
+    if width % views:
+        raise ValueError("Video token width must split evenly across camera views")
+    maps = maps.unflatten(-1, (views, width // views)).permute(0, 3, 1, 2, 4)
+    pooled = F.adaptive_avg_pool2d(maps.flatten(0, 1), grid)
+    return pooled.flatten(2).transpose(1, 2).reshape(batch, frames, views * grid**2, channels)
+
+
 class SemanticIFPHead(nn.Module):
-    def __init__(self, hidden_dim, horizons, target_dim, grid, width=256):
+    def __init__(self, hidden_dim, horizons, target_dim, grid, width=256, *, views=1):
         super().__init__()
         self.grid = grid
+        self.views = views
         self.bottleneck = nn.Sequential(nn.Linear(hidden_dim, width), nn.GELU())
         self.predictions = nn.ModuleList(nn.Linear(width, target_dim) for _ in range(horizons))
 
     def pool(self, states, frames, height, width):
-        batch, _, channels = states.shape
-        maps = states.reshape(batch * frames, height, width, channels).permute(0, 3, 1, 2)
-        pooled = F.adaptive_avg_pool2d(maps, self.grid)
-        return pooled.flatten(2).transpose(1, 2).reshape(batch, frames, self.grid**2, channels)
+        return pool_video_states(states, frames, height, width, self.grid, self.views)
 
     def forward(self, states):
         compact = self.bottleneck(states)

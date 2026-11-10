@@ -11,6 +11,8 @@ from pathlib import Path
 ROLES = ("demo", "query")
 SCHEMA = "roboicl_zerowam_v1"
 ENCODING = "wan_causal_external_rgb_bf16_mu_v1"
+DUAL_ENCODING = "wan_causal_rgb01_horizontal_224_bf16_mu_v1"
+DUAL_SIZE = (224, 448)
 CONTROL_HZ = 50
 ACTION_INTERVAL = 16
 ACTION_CHANNELS = (*range(9), 28)
@@ -122,11 +124,11 @@ def required_latents(plan):
     return sorted({(role, pair[role]) for split in plan["pairs"].values() for pair in split for role in ROLES})
 
 
-def plan_data(root, work, fraction, seed):
+def plan_data(root, work, fraction, seed, dual_view=False):
     rows, pairs, files, bundle_hash = official_indices(root)
     records, splits, validation, excluded = make_split(rows, pairs, fraction, seed)
     plan = {
-        "schema": SCHEMA, "encoding": ENCODING, "bundle_sha256": bundle_hash,
+        "schema": SCHEMA, "encoding": DUAL_ENCODING if dual_view else ENCODING, "bundle_sha256": bundle_hash,
         "source_root": str(root), "split_seed": seed, "validation_fraction": fraction,
         "validation_families": validation, "pairs": splits, **excluded,
         "records": {
@@ -148,9 +150,13 @@ def plan_data(root, work, fraction, seed):
 
 def load_plan(work):
     plan = read_json(work / "plan.json")
-    if plan["schema"] != SCHEMA or plan["encoding"] != ENCODING:
+    if plan["schema"] != SCHEMA or plan["encoding"] not in {ENCODING, DUAL_ENCODING}:
         raise ValueError("Unsupported RoboICL preparation plan")
     return plan
+
+
+def camera_count(plan):
+    return 2 if plan["encoding"] == DUAL_ENCODING else 1
 
 
 def fit_stats(work, plan):
@@ -190,10 +196,15 @@ def encoder_identity(model):
 
 
 def cache_contract(plan, encoder):
-    return {"encoding": ENCODING, "bundle_sha256": plan["bundle_sha256"], "encoder": encoder,
+    contract = {"encoding": plan["encoding"], "bundle_sha256": plan["bundle_sha256"], "encoder": encoder,
             "camera": 0, "demo_resize_hw": [320, 480], "query_resize_hw": [224, 288],
             "demo_fps": 12, "query_rgb_stride": 4, "query_control_hz": CONTROL_HZ,
             "action_interval": ACTION_INTERVAL}
+    if camera_count(plan) == 2:
+        del contract["camera"]
+        contract.update(cameras=[0, 1], composition="horizontal",
+                        demo_resize_hw=list(DUAL_SIZE), query_resize_hw=list(DUAL_SIZE))
+    return contract
 
 
 def latent_plan(frames, role):
@@ -213,7 +224,7 @@ def validate_payload(path, record, contract, role, episode):
     ):
         raise ValueError(f"Cache identity mismatch: {path}")
     length = len(latent_plan(record["frames"], role)["latent_anchor_indices"])
-    spatial = (20, 30) if role == "demo" else (14, 18)
+    spatial = tuple(size // 16 for size in contract[f"{role}_resize_hw"])
     if payload["latent"].shape != (48, length, *spatial) or payload["latent"].dtype != torch.bfloat16:
         raise ValueError(f"Cache latent shape or dtype mismatch: {path}")
     if role == "query":
@@ -226,17 +237,23 @@ def validate_payload(path, record, contract, role, episode):
     return payload
 
 
-def build_cache(work, plan, model, shard, shards):
+def build_cache(work, plan, model, shard, shards, smoke=False, gpu_memory_mib=None):
     import torch
     from filelock import FileLock
     from pilot import encode, recording
     from examples.baselines.zero_wam.zero_wam.runtime import atomic_torch_save
     from examples.baselines.zero_wam.zero_wam.wan_va.modules.utils import WanVAEStreamingWrapper, load_vae
 
+    if gpu_memory_mib is not None:
+        total = torch.cuda.get_device_properties(0).total_memory
+        torch.cuda.set_per_process_memory_fraction(min(gpu_memory_mib * 1024**2 / total, 1), 0)
     contract = cache_contract(plan, encoder_identity(model))
+    views = camera_count(plan)
     root = Path(plan["source_root"])
     wrapper = None
     assignments = required_latents(plan)[shard::shards]
+    if smoke:
+        assignments = [next(item for item in assignments if item[0] == role) for role in ROLES]
     for index, (role, episode) in enumerate(assignments, 1):
         record = plan["records"][episode]
         destination = latent_path(work, role, episode)
@@ -250,12 +267,12 @@ def build_cache(work, plan, model, shard, shards):
             if wrapper is None:
                 vae = load_vae(str(model / "vae"), torch_dtype=torch.bfloat16, torch_device="cuda").eval()
                 wrapper = WanVAEStreamingWrapper(vae)
-            rgb, actions, states = recording(root, episode)
+            rgb, actions, states = recording(root, episode, views=views)
             if len(rgb) != record["frames"]:
                 raise ValueError(f"Recording length mismatch: {episode}")
             sampling = latent_plan(len(rgb), role)
             latent = encode(wrapper, rgb, sampling["sampled_frame_indices"],
-                            tuple(contract[f"{role}_resize_hw"]))
+                            tuple(contract[f"{role}_resize_hw"]), chunk_frames=4 if views == 2 else 16)
             if latent.shape[1] != len(sampling["latent_anchor_indices"]):
                 raise ValueError(f"Unexpected VAE latent length: {episode}")
             payload = {"latent": latent, "role": role, "recording": episode,
@@ -263,8 +280,11 @@ def build_cache(work, plan, model, shard, shards):
             if role == "query":
                 payload.update(actions=actions, states=states, action_chunk_size=ACTION_INTERVAL,
                                latent_nominal_anchor_indices=torch.as_tensor(sampling["latent_nominal_anchor_indices"]))
-            atomic_torch_save(payload, destination)
+            if not smoke:
+                atomic_torch_save(payload, destination)
             print(f"{index}/{len(assignments)} {role} {episode} {list(latent.shape)}", flush=True)
+    if wrapper is not None:
+        print(f"Peak PyTorch CUDA reservation: {torch.cuda.max_memory_reserved() / 1024**2:.0f} MiB", flush=True)
 
 
 def verify(work, plan, model):
@@ -296,15 +316,18 @@ def main():
             sub.add_argument("--root", required=True, type=Path)
             sub.add_argument("--validation-fraction", type=float, default=0.10)
             sub.add_argument("--seed", type=int, default=20261105)
+            sub.add_argument("--dual-view", action="store_true")
         if command in {"cache", "verify"}:
             sub.add_argument("--model", required=True, type=Path)
         if command == "cache":
             sub.add_argument("--shard", type=int, default=0)
             sub.add_argument("--shards", type=int, default=1)
+            sub.add_argument("--smoke", action="store_true")
+            sub.add_argument("--gpu-memory-mib", type=int)
     args = parser.parse_args()
     work = args.work.resolve()
     if args.command == "plan":
-        plan_data(args.root.resolve(), work, args.validation_fraction, args.seed)
+        plan_data(args.root.resolve(), work, args.validation_fraction, args.seed, args.dual_view)
         return
     plan = load_plan(work)
     if args.command == "stats":
@@ -312,7 +335,9 @@ def main():
     elif args.command == "cache":
         if not 0 <= args.shard < args.shards:
             parser.error("expected 0 <= --shard < --shards")
-        build_cache(work, plan, args.model.resolve(), args.shard, args.shards)
+        if args.gpu_memory_mib is not None and args.gpu_memory_mib < 1:
+            parser.error("--gpu-memory-mib must be positive")
+        build_cache(work, plan, args.model.resolve(), args.shard, args.shards, args.smoke, args.gpu_memory_mib)
     else:
         verify(work, plan, args.model.resolve())
 
