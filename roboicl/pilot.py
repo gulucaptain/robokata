@@ -20,8 +20,12 @@ ACTION_CHANNELS = (*range(9), 28)
 ACTION_INTERVAL = 16
 
 
-def recording(root, episode):
-    path = root / "train3000" / "records" / episode / "policy_recording.npz"
+def recording(root, episode, *, views=1, record=None):
+    from prepare import recording_path
+
+    path = recording_path(root, episode, record)
+    if path.suffix != ".npz":
+        raise ValueError("Supervised query actions require a Franka NPZ recording")
     with np.load(path, allow_pickle=False) as data:
         rgb = data["rgb"]
         actions = data["action"]
@@ -36,18 +40,19 @@ def recording(root, episode):
         raise ValueError(f"Invalid control cadence: {path}")
     if not np.isfinite(actions).all() or not np.isfinite(states).all():
         raise ValueError(f"Non-finite robot data: {path}")
-    return rgb[:, 0], torch.from_numpy(actions).float(), torch.from_numpy(states).float()
+    pixels = rgb[:, 0] if views == 1 else np.concatenate((rgb[:, 0], rgb[:, 1]), axis=2)
+    return pixels, torch.from_numpy(actions).float(), torch.from_numpy(states).float()
 
 
 @torch.inference_mode()
-def encode(wrapper, frames, ids, resize):
+def encode(wrapper, frames, ids, resize, *, chunk_frames=16):
     vae = wrapper.vae
     device = next(vae.parameters()).device
     dtype = next(vae.parameters()).dtype
     mean = torch.tensor(vae.config.latents_mean, device=device).view(1, -1, 1, 1, 1)
     std = torch.tensor(vae.config.latents_std, device=device).view(1, -1, 1, 1, 1)
     wrapper.clear_cache()
-    chunks = [ids[:1], *[ids[i:i + 16] for i in range(1, len(ids), 16)]]
+    chunks = [ids[:1], *[ids[i:i + chunk_frames] for i in range(1, len(ids), chunk_frames)]]
     latents = []
     for chunk in chunks:
         video = torch.from_numpy(frames[chunk]).permute(0, 3, 1, 2).float()

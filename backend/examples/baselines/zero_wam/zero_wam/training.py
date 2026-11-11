@@ -509,6 +509,9 @@ def log_update(trainer, values):
         if trainer.config.get("ig_semantic_ifp"):
             row["semantic_ifp_loss"] = values["mcp"]
             row["semantic_ifp_depth_losses"] = values["mcp_depths"]
+        if trainer.config.get("ig_foresight_indexing"):
+            row["foresight_key_loss"] = values["key"]
+            row["loss"] += values["key"]
         run = Path(trainer.config.save_root)
         with (run / "loss.jsonl").open("a") as handle:
             handle.write(json.dumps(row) + "\n")
@@ -522,6 +525,7 @@ def log_update(trainer, values):
 
 def install(Trainer):
     native_prepare = Trainer._prepare_input_dict
+    Trainer.prepare_native_input = native_prepare
     Trainer._ig_native_compute_loss = Trainer.compute_loss
     Trainer._prepare_input_dict = lambda self, batch: prepare_episode(self, batch, native_prepare)
     Trainer._get_next_batch = next_batch

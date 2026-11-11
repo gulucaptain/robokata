@@ -1,0 +1,49 @@
+{
+  "name": "RoboKata-11.11",
+  "date": "2026-11-11",
+  "schema": "robokata_mixed25000_v1",
+  "train_pairs": 25000,
+  "source_pairs": {
+    "new": 12000,
+    "old": 13000
+  },
+  "demo_embodiments": {
+    "franka-panda": 19000,
+    "aloha-agilex": 6000
+  },
+  "evaluation_pairs": 1200,
+  "demo_cameras": [
+    0
+  ],
+  "query_cameras": [
+    0,
+    1
+  ],
+  "demo_resize_hw": [
+    224,
+    224
+  ],
+  "query_resize_hw": [
+    224,
+    448
+  ],
+  "plan_sha256": "f9bd50f7f768166f02f3eebaa08e3f19b8fc7f3cd7fadae4914834f9a89ed23c",
+  "stats_sha256": "08675bafd28639ddad3d05cd73de755d1cd0bca80aec2be293395f074d1d6aff",
+  "manifest_sha256": {
+    "pairs.jsonl": "578c3ff876395efb57a78a3d4eeb3d75efe11bed0164b4917b44fb3aae7acf4b",
+    "records.jsonl": "db1a35f1021ad015136c40323fb6640719b5ac6aec76cfc00ce68f12d884abe9",
+    "validation.json": "d54f02c3f6e6769ab92aeed7f627e2a07a2980733f04bce2c670d9628379c472"
+  },
+  "code_sha256": "7fe84c282b2be14778a20b335485c18eb9bdba020271faa361f8cebbbd6bbac1",
+  "base_model": "/data/haoyuzhao/envs/video/zero-wam-ig10k/weights/zero-wam-pretrain",
+  "dino_encoder": "/data/haoyuzhao/models/dinov2-base",
+  "python": "/data/haoyuzhao/models/weights/lingbot-va/.venv/bin/python",
+  "gpu_ids": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "gpu_memory_budget_mib": 16384,
+  "cache_shards": 4
+}

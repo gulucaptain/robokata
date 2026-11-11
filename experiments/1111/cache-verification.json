@@ -1,0 +1,20 @@
+{
+  "acceleration_sha256": "3a4dae869cc6a58aeb6898509ffd1b11d7d558c55a2937452c41ce143478cee9",
+  "code_sha256": "7fe84c282b2be14778a20b335485c18eb9bdba020271faa361f8cebbbd6bbac1",
+  "demo_feature_recordings": 6380,
+  "demo_features_sha256": "cae39af9250b50188291fbdec6de8b7726d2424e01b8759708f4e0a553dd2baf",
+  "evaluation_pairs": 1200,
+  "finished_at": 1794383074.3389924,
+  "plan_sha256": "f9bd50f7f768166f02f3eebaa08e3f19b8fc7f3cd7fadae4914834f9a89ed23c",
+  "query_encoding_script_sha256": "e94232e5a0e30f13521f8d01e391356c6a341aa33fe22112cb87cfd3c2892899",
+  "query_feature_recordings": 5700,
+  "query_features_sha256": "bdc6d48ae5efb99cc9bc190ac1a5ea325f9dbbc3620cfeafa31af832013aac0c",
+  "real_query_anchors": 165279,
+  "stats_sha256": "08675bafd28639ddad3d05cd73de755d1cd0bca80aec2be293395f074d1d6aff",
+  "status": "verified",
+  "train_pairs": 25000,
+  "vae_latents": 12380,
+  "vae_receipt_sha256": "9ff6fa66e2aefba43d6f354a51b0cea4e9c6fd497bd8da28da282a00b1fdfdad",
+  "version": "11.11",
+  "version_sha256": "8323d4ac86c72b42984e5ee267baf56703b0bcb53af6d1b38dc524c1e060bbee"
+}

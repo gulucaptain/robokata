@@ -1,89 +1,114 @@
-# RoboKata · Robot-ICL + A and B1
+# RoboKata mixed 25k
 
-This source snapshot contains the RoboICL preparation, DINOv2 caches, training
-and recorded-episode inference entry points for Version A and A+B1. The
-Zero-WAM backend was adapted from The-Imitator-Game commit `3c3404a` and
-Zero-WAM commit `08e2c4a`.
+**11.11 training release.** Epoch weights are published to
+[gulucaptain/RoboKata-1111](https://huggingface.co/gulucaptain/RoboKata-1111).
+For checkpoint download and evaluation commands, see
+[the 11.11 inference guide](docs/EVALUATION-1111.md).
+The actual run settings and normalization are in [experiments/1111](experiments/1111).
 
-Use a Python 3.10 CUDA environment with PyTorch 2.9 and the dependencies listed in `requirements-server.txt`. Activate that environment and set `PYTHONPATH` to this repository's `backend/` directory. Inputs and outputs go outside the source directory. Supply the verified RoboICL release, base Zero-WAM weights, the empty text embedding and DINOv2 weights separately.
+This independent variant trains A+B1+Foresight Indexing from Zero-WAM pretrain.
+It uses all 12,000 RoboKata v2.1 official pairs and 13,000 selected old training
+pairs, yielding 19,000 Franka-to-Franka and 6,000 ALOHA-to-Franka pairs.
+Each namespaced recording has its original path and SHA-256. Old and new
+same-name RGB recordings have separate cache identities.
+
+Demo VAE inputs use external/head camera 0 at 224×224. ALOHA HDF5 decoding
+reads only head-camera JPEGs. Demo DINO uses 8 frames × 4 cells = 32 tokens
+of dimension 780. Queries use external + left wrist at 224×448.
+B1 and key regression supervise both query views. Foresight matching compares
+the query external-camera cells to the external-only demo cells.
+
+The independent evaluation split contains 1,200 frozen pairs. The old validation
+split overlaps the new training data and is excluded. Inference predicts the
+first 16 recorded-episode actions. Closed-loop evaluation needs simulator integration.
+
+## Environment
+
+Use the existing PyTorch 2.9 training environment and requirements-server.txt,
+including h5py 3.15.1. ROOT is this directory. Set these paths for the experiment.
 
 ```bash
-ROOT="$(pwd -P)"
-PY=python
+ROOT=/absolute/path/to/RoboKata-mixed25k
+PY=/path/to/training/python
 export PYTHONPATH="$ROOT/backend"
-# Set these to existing absolute paths, outside RoboKata.
-# DATA, WORK, MODEL, EMPTY_TEXT, DINO, DEMO_CACHE, RUN
+DATA=/data/haoyuzhao/exps/train/robokata-dataset-v21-20261111/data
+MIXED=/data/haoyuzhao/exps/train/robokata-dataset-v21-20261111/train25000
+WORK=/absolute/path/to/new/mixed25k-cache
+RUN=/absolute/path/to/new/mixed25k-run
+MODEL=/data/haoyuzhao/envs/video/zero-wam-ig10k/weights/zero-wam-pretrain
+DINO=/data/haoyuzhao/models/dinov2-base
+EMPTY_TEXT=/home/zhaohaoyu/code/zero-wam-ig10k/Zero-WAM/wan_va/assets/empty_text_emb.pt
 ```
 
-## Prepare
-
-Reuse the original verified `WORK` and `DEMO_CACHE` when continuing an existing run. To prepare a new work directory, run:
+## Data and caches
 
 ```bash
-"$PY" "$ROOT/roboicl/prepare.py" plan --root "$DATA" --work "$WORK"
+"$PY" "$ROOT/roboicl/prepare.py" plan --root "$DATA" --mixed-manifest "$MIXED" \
+  --work "$WORK" --dual-view --demo-top-view
+"$PY" "$ROOT/roboicl/check_data.py" --work "$WORK" --workers 8 --output "$WORK/data-check.json"
 "$PY" "$ROOT/roboicl/prepare.py" stats --work "$WORK"
 "$PY" "$ROOT/roboicl/prepare.py" cache --work "$WORK" --model "$MODEL"
 "$PY" "$ROOT/roboicl/prepare.py" verify --work "$WORK" --model "$MODEL"
 "$PY" "$ROOT/roboicl/demo_features.py" --work "$WORK" --encoder "$DINO" \
-  --output "$DEMO_CACHE" --device cuda:0 --bf16
+  --output "$WORK/demo-dino.pt" --device cuda:0 --bf16
+"$PY" "$ROOT/roboicl/semantic_features.py" --work "$WORK" --encoder "$DINO" \
+  --output "$WORK/query-dino.pt" --device cuda:0 --bf16
+"$PY" "$ROOT/roboicl/semantic_features.py" --work "$WORK" --encoder "$DINO" \
+  --output "$WORK/query-dino.pt" --verify
 ```
 
-For parallel extraction, pass `--shards N --shard I` to each cache worker. VAE workers write independent files and `verify` follows the last worker. For the DINOv2 cache, merge by running `demo_features.py` with `--shards N` and no `--shard` after all parts finish. Use the same encoder and precision for all parts and the merge.
+VAE extraction uses the GPU exposed by the caller, or --device cpu --threads 16.
+VAE workers accept --shards N --shard I and lock individual cache files.
+Both DINO extractors accept --shards N --shard I. Merge using the same command
+with --shards N and no --shard, keeping the same encoder and precision.
+
+Full caches include 6,380 demo latents and 6,000 query latents. Only training
+queries supply normalization statistics and B1 targets. The source check covers
+all 6,680 source records, NPZ headers/actions, 50 Hz timing, ALOHA JPEG decoding,
+and representative NPZ camera decoding. Source hashes are checked by statistics
+fitting and cache extraction. VAE verification checks source identity, role,
+encoder identity, shape, dtype, finite values and action cadence.
 
 ## Train
 
 ```bash
-CUDA_VISIBLE_DEVICES="${TRAIN_GPUS:-0,1,2,3}" "$PY" -m torch.distributed.run --standalone --nproc-per-node=4 \
+CUDA_VISIBLE_DEVICES="${TRAIN_GPUS:?Set the four allocated GPUs}" \
+"$PY" -m torch.distributed.run --standalone --nproc-per-node=4 \
   "$ROOT/roboicl/train_entry.py" --work "$WORK" --model "$MODEL" \
-  --empty-text "$EMPTY_TEXT" --run-dir "$RUN" --demo-features "$DEMO_CACHE" \
-  --epochs 20 --batch-per-gpu 16 --warmup-steps 0 --learning-rate 5e-5 \
-  --cuda-cache-gib 120 --initialize-from "$BASELINE_CHECKPOINT"
+  --empty-text "$EMPTY_TEXT" --run-dir "$RUN" \
+  --demo-features "$WORK/demo-dino.pt" --demo-dropout 0.3 \
+  --semantic-features "$WORK/query-dino.pt" --semantic-weight 0.5 \
+  --foresight-indexing --key-weight 0.5 --batch-per-gpu 16 \
+  --epochs 20 --save-epoch-freq 1 --warmup-steps 0 --learning-rate 5e-5 \
+  --seed 1 --num-workers 2 --cuda-cache-gib 120
 ```
 
-The launcher accepts the same arguments as `roboicl/train.py` plus `--cuda-cache-gib`. The CUDA cache flag creates a reusable allocator pool and suppresses periodic cache purges. Set it only on GPUs allocated to the run. The default is zero. For an existing Version A run, use `--resume-from "$RUN/checkpoints/latest.pt"` in place of `--initialize-from` and keep the original seed, rank count, batch, schedule and cache. `--initialize-from` loads a compatible Robot-ICL baseline adapter and starts a new optimizer. Each completed epoch gets a separate checkpoint and `latest.pt` is a rolling restart point.
+The optimizer, scheduler implementation, model adaptations, BF16 precision and
+activation checkpointing are inherited from the current dual-view experiment.
+The command preserves four ranks, per-GPU batch 16, effective batch 64, 20 epochs,
+learning rate 5e-5, warmup 0, demo dropout 0.3, and auxiliary weights 0.5.
 
-## Infer
+The inherited sampler groups exact temporal shapes and drops incomplete batches.
+This manifest yields 368 updates per epoch, 23,552 presentations per epoch and
+7,360 updates over 20 epochs. The manifest contains 25,000 pairs. The data-check
+report records the retained embodiment counts at seed 1, epoch 0.
+Resume with the same caches, world size, batch and options using --resume-from.
+A CPU --dry-run is available after the full caches have been built and verified.
+
+## Infer and publish
 
 ```bash
-CUDA_VISIBLE_DEVICES="${INFER_GPU:-0}" "$PY" "$ROOT/roboicl/infer_checkpoint.py" \
-  --work "$WORK" --model "$MODEL" --empty-text "$EMPTY_TEXT" \
-  --checkpoint "$RUN/checkpoints/epoch_001.pt" --demo-features "$DEMO_CACHE" \
-  --pair-index 0 --output "$OUTPUT_JSON"
+"$PY" "$ROOT/roboicl/infer_checkpoint.py" --work "$WORK" --model "$MODEL" \
+  --empty-text "$EMPTY_TEXT" --demo-features "$WORK/demo-dino.pt" \
+  --checkpoint "$RUN/checkpoints/latest.pt" --pair-index 0 --output "$OUTPUT_JSON"
+"$PY" "$ROOT/roboicl/publish_epochs.py" --run "$RUN" \
+  --state-dir "$UPLOAD_STATE" --repo "$HF_REPO"
 ```
 
-The inference entry point generates the first 16 actions for a held-out recorded pair. Add `--disable-demo-attention` to compare A-off with the same checkpoint, pair and seed. This is a recorded-episode inference entry point.
-
-`roboicl/publish_epochs.py` is a separate, opt-in publisher for A and A+B1
-epoch adapters. Supply `--run`, a dedicated `--state-dir`, and an existing
-public `--repo` belonging to the signed-in Hugging Face user. Use a separate
-repository and state directory for each version.
-
-## Original baseline
-
-See [baseline/README.md](baseline/README.md) for the first Robot-ICL run and its separate, unmodified backend.
-
-## Version A + B1
-
-B1 replaces latent MCP denoising with prediction of frozen DINOv2 features.
-Use the same Version A demo cache and extract a second cache from the **training
-queries**. Each target uses the external camera frame at the causal VAE
-latent's nominal anchor, pooled to a 2×2 grid. Anchors beyond the recorded
-RGB tail are masked. The original four horizons, in chunks, are 1, 3, 5 and 7.
-
-```bash
-"$PY" "$ROOT/roboicl/semantic_features.py" --work "$WORK" --encoder "$DINO" \
-  --output "$SEMANTIC_CACHE" --device cuda:0 --bf16
-```
-
-Use `--shards N --shard I` for separate workers, followed by `--shards N`
-without `--shard` to merge. Rerun the cache command with `--verify` to check
-the merged cache, including the encoder identity, anchor mask and finite values.
-Add `--semantic-features "$SEMANTIC_CACHE"` and
-`--semantic-weight 0.5` to the training command and choose a new run directory.
-`--initialize-from "$A_CHECKPOINT"` loads A's compatible adapter weights and
-starts a new optimizer. For a matched A-only control, start from the same A
-checkpoint with the same recipe and omit `--semantic-features`.
-
-B1's heads supervise training only. Inference accepts an A+B1 checkpoint with
-the same command and demo cache as Version A. A+B1 checkpoints require their
-semantic target cache and loss weight when resuming training.
+Inference selects a Franka or ALOHA external-only demo and dual-view Franka
+query from frozen evaluation. It validates cache identities and the raw query
+hash. B1 target features are used during training only.
+Run the publisher alongside training with a dedicated state directory and
+destination repository. It uploads each completed epoch and verifies remote
+size and SHA-256. Safetensors inference additionally requires --adapter-config
+and the matching adapter.json receipt beside the epoch adapter.

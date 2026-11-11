@@ -198,13 +198,13 @@ def valid_seq_ids(model, seq_ids, blocks):
     video_lengths, human_lengths, video_max, human_max = model.ig_batch_lengths
     batch = video_lengths.shape[0]
     device = seq_ids.device
-    # The IG zed2i latent is14x14; native spatial patch is2x2.
-    spatial = 49
+    # The IG zed2i latent is 14x14 with 2x2 patches.
+    spatial, human_spatial = getattr(model, "icl_spatial_tokens", (49, 49))
     video = torch.arange(video_max * spatial, device=device)[None] < video_lengths[:, None] * spatial
     action = torch.arange(video_max * 16, device=device)[None] < video_lengths[:, None] * 16
     parts = [video, video]
     if blocks is model.blocks and human_max:
-        human = torch.arange(human_max * spatial, device=device)[None] < human_lengths[:, None] * spatial
+        human = torch.arange(human_max * human_spatial, device=device)[None] < human_lengths[:, None] * human_spatial
         parts.append(human)
     parts += [action, action]
     valid = torch.cat(parts, dim=1)

@@ -7,7 +7,7 @@ import numpy as np
 import torch
 from torch.nn import functional as F
 
-from prepare import load_plan, recording_path, sha256
+from prepare import camera_count, load_plan, recording_path, sha256
 
 
 FRAMES = 8
@@ -16,24 +16,28 @@ SIZE = 168
 FEATURE_DIM = 768 + FRAMES + GRID**2
 TOKEN_COUNT = FRAMES * GRID**2
 SCHEMA = "dinov2_base_uniform8_grid2_168_v1"
+DUAL_SCHEMA = "dinov2_base_rgb01_uniform8_grid2_168_v1"
+
+
+def feature_shape(views):
+    return FRAMES * views * GRID**2, FEATURE_DIM + (views if views > 1 else 0)
 
 
 def demo_ids(plan):
     return sorted({pair["demo"] for split in plan["pairs"].values() for pair in split})
 
 
-def sampled_video(path, expected_frames):
-    # Sample the midpoint of each temporal segment from external camera 0.
+def sampled_video(path, expected_frames, views=1):
+    # Sample the same midpoint from every selected camera.
     indices = ((np.arange(FRAMES) + 0.5) * expected_frames / FRAMES).astype(int)
-    return read_external_rgb(path, expected_frames, indices)
+    return read_camera_rgb(path, expected_frames, indices, views)
 
 
-def read_external_rgb(path, expected_frames, indices):
-    with np.load(path, allow_pickle=False) as data:
-        rgb = data["rgb"]
-    if rgb.shape != (expected_frames, 2, 224, 224, 3) or rgb.dtype != np.uint8:
-        raise ValueError(f"Unexpected RoboICL video format: {path}")
-    return torch.from_numpy(rgb[indices, 0])
+def read_camera_rgb(path, expected_frames, indices, views):
+    from recording_io import read_rgb
+
+    rgb = read_rgb(path, expected_frames, indices, views)
+    return torch.from_numpy(rgb.reshape(-1, 224, 224, 3))
 
 
 @torch.inference_mode()
@@ -49,12 +53,16 @@ def encode_patches(model, frames):
 
 
 @torch.inference_mode()
-def encode(model, frames):
-    visual = encode_patches(model, frames).reshape(-1, FRAMES, GRID**2, 768)
+def encode(model, frames, views=1):
+    visual = encode_patches(model, frames).reshape(-1, FRAMES, views, GRID**2, 768)
     batch = len(visual)
-    time = torch.eye(FRAMES).view(1, FRAMES, 1, FRAMES).expand(batch, -1, GRID**2, -1)
-    space = torch.eye(GRID**2).view(1, 1, GRID**2, GRID**2).expand(batch, FRAMES, -1, -1)
-    return torch.cat([visual, time, space], dim=-1).reshape(batch, TOKEN_COUNT, FEATURE_DIM).half()
+    time = torch.eye(FRAMES).view(1, FRAMES, 1, 1, FRAMES).expand(batch, -1, views, GRID**2, -1)
+    space = torch.eye(GRID**2).view(1, 1, 1, GRID**2, -1).expand(batch, FRAMES, views, -1, -1)
+    parts = [visual, time, space]
+    if views > 1:
+        camera = torch.eye(views).view(1, 1, views, 1, views).expand(batch, FRAMES, -1, GRID**2, -1)
+        parts.append(camera)
+    return torch.cat(parts, dim=-1).reshape(batch, *feature_shape(views)).half()
 
 
 def load_encoder(path, device):
@@ -69,18 +77,19 @@ def load_encoder(path, device):
 def load_features(path, work, plan):
     payload = torch.load(path, map_location="cpu", weights_only=True, mmap=True)
     ids = demo_ids(plan)
+    views = camera_count(plan, "demo")
     if (payload["schema"], payload["plan_sha256"], payload["demo_ids"]) != (
-        SCHEMA, sha256(work / "plan.json"), ids
+        DUAL_SCHEMA if views == 2 else SCHEMA, sha256(work / "plan.json"), ids
     ):
         raise ValueError("Demo feature cache does not match this RoboICL plan")
     values = payload["features"]
-    if values.shape != (len(ids), TOKEN_COUNT, FEATURE_DIM) or values.dtype != torch.float16:
+    if values.shape != (len(ids), *feature_shape(views)) or values.dtype != torch.float16:
         raise ValueError("Unexpected demo feature tensor")
     return {episode: index for index, episode in enumerate(ids)}, values
 
 
-def merge_shards(output, ids, contract, count, save):
-    features = torch.empty((len(ids), TOKEN_COUNT, FEATURE_DIM), dtype=torch.float16)
+def merge_shards(output, ids, contract, count, save, views):
+    features = torch.empty((len(ids), *feature_shape(views)), dtype=torch.float16)
     for shard in range(count):
         part = torch.load(shard_path(output, shard, count), map_location="cpu", weights_only=True)
         indices = slice(shard, None, count)
@@ -127,11 +136,12 @@ def main():
 
     plan = load_plan(args.work)
     ids = demo_ids(plan)
-    contract = dict(schema=SCHEMA, plan_sha256=sha256(args.work / "plan.json"),
+    views = camera_count(plan, "demo")
+    contract = dict(schema=DUAL_SCHEMA if views == 2 else SCHEMA, plan_sha256=sha256(args.work / "plan.json"),
                     encoder_sha256=sha256(args.encoder / "model.safetensors"),
                     encoder_precision="bf16" if args.bf16 else "fp32")
     if args.shards > 1 and args.shard is None:
-        merge_shards(output, ids, contract, args.shards, atomic_torch_save)
+        merge_shards(output, ids, contract, args.shards, atomic_torch_save, views)
         print(f"Merged {len(ids)} demos into {output}")
         return
     model = load_encoder(args.encoder, device)
@@ -139,12 +149,16 @@ def main():
     selected = ids[args.shard or 0 :: args.shards]
     if args.smoke:
         selected = selected[:1]
-    features = torch.empty((len(selected), TOKEN_COUNT, FEATURE_DIM), dtype=torch.float16)
+    features = torch.empty((len(selected), *feature_shape(views)), dtype=torch.float16)
     for start in range(0, len(selected), args.episodes_per_batch):
         batch_ids = selected[start : start + args.episodes_per_batch]
-        rgb = torch.cat([sampled_video(recording_path(root, ep), plan["records"][ep]["frames"]) for ep in batch_ids])
+        for episode in batch_ids:
+            record = plan["records"][episode]
+            if sha256(recording_path(root, episode, record)) != record["source_sha256"]:
+                raise ValueError(f"Demo recording changed: {episode}")
+        rgb = torch.cat([sampled_video(recording_path(root, ep, plan["records"][ep]), plan["records"][ep]["frames"], views) for ep in batch_ids])
         with torch.autocast(device.type, dtype=torch.bfloat16, enabled=args.bf16):
-            features[start : start + len(batch_ids)] = encode(model, rgb)
+            features[start : start + len(batch_ids)] = encode(model, rgb, views)
         end = start + len(batch_ids)
         if start == 0 or end % 64 == 0 or end == len(selected):
             print(f"Encoded {end}/{len(selected)} demos", flush=True)

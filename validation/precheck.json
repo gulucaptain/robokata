@@ -1,0 +1,373 @@
+{
+  "data": {
+    "batch_per_gpu": 16,
+    "cache_entries": {
+      "demo": 6380,
+      "query": 6000
+    },
+    "cache_validation": "source metadata and RGB checked; encoder cache smoke is separate",
+    "checked_records": 6680,
+    "decoded_cases": [
+      {
+        "episode": "eval__E380_O05_DA1_A00",
+        "group": [
+          "evaluation",
+          "aloha",
+          "demo"
+        ],
+        "shape": [
+          3,
+          1,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "eval__E380_O05_DF1_A00",
+        "group": [
+          "evaluation",
+          "franka",
+          "demo"
+        ],
+        "shape": [
+          3,
+          1,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "eval__E380_O04_Q03_A00",
+        "group": [
+          "evaluation",
+          "franka",
+          "query"
+        ],
+        "shape": [
+          3,
+          2,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "new__M600V2_AB4_G196_A00_T0",
+        "group": [
+          "new",
+          "aloha",
+          "demo"
+        ],
+        "shape": [
+          3,
+          1,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "new__FR2P_FW1_I346_C3_T4",
+        "group": [
+          "new",
+          "franka",
+          "demo"
+        ],
+        "shape": [
+          3,
+          1,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "new__FR2P_FW1_I346_C3_T4",
+        "group": [
+          "new",
+          "franka",
+          "query"
+        ],
+        "shape": [
+          3,
+          2,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "old__FR2P_FW1_I346_C3_T4",
+        "group": [
+          "old",
+          "franka",
+          "demo"
+        ],
+        "shape": [
+          3,
+          1,
+          224,
+          224,
+          3
+        ]
+      },
+      {
+        "episode": "old__FR2P_FW1_I346_C3_T4",
+        "group": [
+          "old",
+          "franka",
+          "query"
+        ],
+        "shape": [
+          3,
+          2,
+          224,
+          224,
+          3
+        ]
+      }
+    ],
+    "dropped_pairs_per_epoch": 1448,
+    "evaluation_pairs": 1200,
+    "retained_demo_embodiments": {
+      "aloha-agilex": 5201,
+      "franka-panda": 18351
+    },
+    "retained_pairs_per_epoch": 23552,
+    "status": "passed",
+    "steps_per_epoch": 368,
+    "train_pairs": 25000,
+    "world_size": 4
+  },
+  "cached_batches": {
+    "cases": [
+      {
+        "batch_size": 16,
+        "demo_kind": "franka",
+        "demo_shape": [
+          16,
+          48,
+          24,
+          14,
+          14
+        ],
+        "demo_tokens": [
+          16,
+          32,
+          780
+        ],
+        "finite_loss": 2.0226943492889404,
+        "query_targets": [
+          16,
+          25,
+          8,
+          768
+        ],
+        "source": "old",
+        "video_shape": [
+          16,
+          48,
+          25,
+          14,
+          28
+        ]
+      },
+      {
+        "batch_size": 16,
+        "demo_kind": "franka",
+        "demo_shape": [
+          16,
+          48,
+          24,
+          14,
+          14
+        ],
+        "demo_tokens": [
+          16,
+          32,
+          780
+        ],
+        "finite_loss": 2.0308620929718018,
+        "query_targets": [
+          16,
+          25,
+          8,
+          768
+        ],
+        "source": "new",
+        "video_shape": [
+          16,
+          48,
+          25,
+          14,
+          28
+        ]
+      },
+      {
+        "batch_size": 16,
+        "demo_kind": "aloha",
+        "demo_shape": [
+          16,
+          48,
+          29,
+          14,
+          14
+        ],
+        "demo_tokens": [
+          16,
+          32,
+          780
+        ],
+        "finite_loss": 2.0375208854675293,
+        "query_targets": [
+          16,
+          25,
+          8,
+          768
+        ],
+        "source": "new",
+        "video_shape": [
+          16,
+          48,
+          25,
+          14,
+          28
+        ]
+      }
+    ],
+    "source_mismatch_rejected": true,
+    "status": "passed"
+  },
+  "full_statistics": {
+    "action": {
+      "q01": [
+        -0.47464228004217146,
+        -0.27514299750328064,
+        0.858143150806427,
+        -0.9999682307243347,
+        -0.09971951320767403,
+        -0.2609236240386963,
+        -0.09998992659151554,
+        -0.9999764561653137,
+        -0.1951647211611271,
+        -1
+      ],
+      "q99": [
+        -0.11047536879777908,
+        0.12279897183179855,
+        1.2242214679718018,
+        0.9999904632568359,
+        0.9999457597732544,
+        0.49800825119018555,
+        1,
+        0.9999653697013855,
+        0.1824609935283661,
+        1
+      ]
+    },
+    "clip": 2,
+    "plan_sha256": "f9bd50f7f768166f02f3eebaa08e3f19b8fc7f3cd7fadae4914834f9a89ed23c",
+    "query_recordings": 5700,
+    "representation": "roboicl_world_hand10_absolute",
+    "state": {
+      "q01": [
+        -0.47464228004217146,
+        -0.27514299750328064,
+        0.858143150806427,
+        -0.9999682307243347,
+        -0.09971951320767403,
+        -0.2609236240386963,
+        -0.09998992659151554,
+        -0.9999764561653137,
+        -0.1951647211611271,
+        -1
+      ],
+      "q99": [
+        -0.11047536879777908,
+        0.12279897183179855,
+        1.2242214679718018,
+        0.9999904632568359,
+        0.9999457597732544,
+        0.49800828099250793,
+        1,
+        0.9999653697013855,
+        0.1824609935283661,
+        1
+      ]
+    }
+  },
+  "vae_cache": {
+    "contract": {
+      "action_interval": 16,
+      "bundle_sha256": "4c8cda144102a79e0621ebc849f9bd5cf37c9beae0ee58d1d58ab02b59157a6d",
+      "cameras": [
+        0,
+        1
+      ],
+      "composition": "horizontal",
+      "demo_cameras": [
+        0
+      ],
+      "demo_fps": 12,
+      "demo_resize_hw": [
+        224,
+        224
+      ],
+      "encoder": {
+        "config.json": "d996c340fe9a7df5d7371f76a7d8d6956f6c98256080074d8434fa5eeac11360",
+        "diffusion_pytorch_model.safetensors": "62cd18f19438e35b32ac63020e2852f566e9b02f46b6cdbd87972a356e3c6f4b"
+      },
+      "encoding": "wan_causal_rgb01_horizontal_224_bf16_mu_v1",
+      "query_control_hz": 50,
+      "query_resize_hw": [
+        224,
+        448
+      ],
+      "query_rgb_stride": 4
+    },
+    "latents": {
+      "latents/demo/eval__E380_O05_DA1_A00.pt": [
+        548073,
+        1794368669317301800
+      ],
+      "latents/demo/eval__E380_O05_DF1_A00.pt": [
+        453993,
+        1794368682452011000
+      ],
+      "latents/demo/new__FR2P_FW1_I204_C8_T1.pt": [
+        453993,
+        1794368695813715000
+      ],
+      "latents/demo/new__M600V2_AB4_G155_A00_T0.pt": [
+        548073,
+        1794368703800538400
+      ],
+      "latents/demo/old__FR2P_FW1_I346_C3_T4.pt": [
+        453993,
+        1794368716998246100
+      ],
+      "latents/query/eval__E380_O05_Q01_A00.pt": [
+        975325,
+        1794368740243731700
+      ],
+      "latents/query/new__FR2P_FW1_I342_C1_T3.pt": [
+        974685,
+        1794368753811431400
+      ],
+      "latents/query/new__PCV1_FR2P_FW1_I084_C01_T5.pt": [
+        975133,
+        1794368767925119200
+      ],
+      "latents/query/old__FR2P_FW1_I342_C1_T3.pt": [
+        974685,
+        1794368786802701600
+      ]
+    },
+    "model_path": "/data/haoyuzhao/envs/video/zero-wam-ig10k/weights/zero-wam-pretrain",
+    "plan_sha256": "e23512d8ff9dfb79b983b1f08f72c826172becfc43fa8172d9c0aa13bacd2b7d",
+    "stats_sha256": "858c8e23dffccb0545aabfc54f7deeb4962fcd4849700c5eff2a86f8f94169ed"
+  },
+  "cache_check_status": "complete"
+}

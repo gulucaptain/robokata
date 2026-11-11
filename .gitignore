@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.DS_Store
+.venv/
+.env
+.env.*
+!.env.example
+cache/
+weights/
+runs/
+outputs/
+*.pt
+*.safetensors
+*.npz
+*.hdf5
+*.zip

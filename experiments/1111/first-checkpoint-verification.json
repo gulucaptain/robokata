@@ -1,0 +1,21 @@
+{
+  "status": "verified",
+  "checkpoint_path": "/data/haoyuzhao/exps/train/robokata-1111/run/checkpoints/latest.pt",
+  "checkpoint_bytes": 5648536455,
+  "checkpoint_step": 1,
+  "progress": {
+    "epoch": 0,
+    "next_batch": 1,
+    "sample_offset": 64
+  },
+  "adapter_tensors": 1017,
+  "optimizer_states": 1017,
+  "rng_ranks": 4,
+  "all_adapter_and_optimizer_tensors_finite": true,
+  "publisher_remote_contract_matches": true,
+  "hf_repo": "gulucaptain/RoboKata-1111",
+  "metrics_step": 1,
+  "effective_batch": 64,
+  "batch_per_gpu": 16,
+  "allocator_ooms": 0
+}
