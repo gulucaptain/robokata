@@ -1,0 +1,18 @@
+{
+  "source_run": "pi05-lora-cached-sdpa-b256-e50-20261114-02",
+  "hf_run": "pi05-lora-cached-sdpa-b256-e50-20261114-02-f33d99c88aeb",
+  "frozen_source_files": 107,
+  "source_sha256_all_match": true,
+  "base_source": "gs://openpi-assets/checkpoints/pi05_base",
+  "base_sha256": "abecb1fa2c618368b5aecbc0e10c546f64927077d88fea6afc7c564371781270",
+  "official_cache_objects_checked": 29,
+  "official_cache_mismatches": 0,
+  "official_parameter_tensors_compared": 811,
+  "bf16_tensor_mismatches": 0,
+  "tied_embedding_alias_verified": true,
+  "unused_extra_tensor": "paligemma_with_expert.gemma_expert.lm_head.weight",
+  "verification_device": "cpu",
+  "cpu_tests_passed": 18,
+  "cpu_tests_seconds": 15.231,
+  "clean_environment_install_tested": false
+}

@@ -112,3 +112,11 @@ Run the publisher alongside training with a dedicated state directory and
 destination repository. It uploads each completed epoch and verifies remote
 size and SHA-256. Safetensors inference additionally requires --adapter-config
 and the matching adapter.json receipt beside the epoch adapter.
+
+## π0.5 RGB Demo baseline
+
+The training and checkpoint inference code for
+[gulucaptain/pi05-icl3000-demo](https://huggingface.co/gulucaptain/pi05-icl3000-demo)
+is available in [baselines/pi05-demo](baselines/pi05-demo). It includes the
+reference run contract, frozen source hashes, LoRA/cached-Demo implementation,
+and environment and inference instructions.

@@ -1,0 +1,20 @@
+{
+  "repo_id": "gulucaptain/pi05-icl3000-demo",
+  "repo_type": "model",
+  "private": true,
+  "automatic_upload_enabled": true,
+  "purpose": "pi05 RGB Demo LoRA approximately400M trainable checkpoints",
+  "status": "configured_before_training",
+  "upload_contents": [
+    "lora_and_extra_trainable_parameters",
+    "normalization_assets",
+    "tokenizer",
+    "model_config",
+    "data_manifest",
+    "frozen_source"
+  ],
+  "upload_optimizer": false,
+  "verify_remote_sha256": true,
+  "upload_final_partial_checkpoint": true,
+  "requires_official_base_for_inference": true
+}
