@@ -19,12 +19,15 @@ class RoboICLPolicy(policy.ZeroWAMAgent):
     def clear_cache(self):
         super().clear_cache()
         self.demo_features = None
+        self.demo_latents = None
 
     def _state(self, obs):
         return F.pad(self.roboicl_space.normalize(obs["state"].to(self.device), "state"), (0, 8))
 
     def _stream(self, data, timestep, action, cache_type, frame_id, icl=False, frame_shift=None):
         inputs = super()._stream(data, timestep, action, cache_type, frame_id, icl, frame_shift)
+        if action and self.demo_latents is not None:
+            inputs["demo_latents"] = self.demo_latents
         indexed_video = not action and not icl and hasattr(self.transformer, "foresight_indexing")
         if self.demo_features is not None and (action or indexed_video):
             inputs["demo_features"] = self.demo_features
@@ -47,14 +50,18 @@ def load_checkpoint(path, adapter_config, model, plan):
     receipt = read_json(path.with_name("adapter.json"))
     if (path.stat().st_size, sha256(path)) != (receipt["size_bytes"], receipt["sha256"]):
         raise ValueError("Published adapter differs from its upload receipt")
-    if not config.get("foresight_indexing") or config["video_encoding"] != plan["encoding"]:
-        raise ValueError("Published adapter does not match the indexed RoboICL plan")
+    latent = config.get("demo_source") == "latent"
+    if (not config.get("foresight_indexing") and not latent) or config["video_encoding"] != plan["encoding"]:
+        raise ValueError("Published adapter does not match the indexed/A_latent RoboICL plan")
+    if latent and (config.get("semantic_ifp") or config.get("foresight_indexing")):
+        raise ValueError("A_latent must not contain semantic foresight or indexing")
     settings = {
         "ig_roboicl_channels": config["action_channels"],
         "ig_roboicl_cache_sha256": config["latent_receipt_sha256"],
         "ig_demo_attention": config["demo_attention"],
-        "ig_demo_cache_sha256": config["demo_features_sha256"],
-        "ig_foresight_indexing": config["foresight_indexing"],
+        "ig_demo_cache_sha256": config.get("demo_features_sha256"),
+        "ig_foresight_indexing": config.get("foresight_indexing"),
+        "ig_demo_source": config.get("demo_source", "dino"),
         "ig_lora_rank": config["lora_rank"],
         "snr_shift": config["video_snr_shift"],
         "action_snr_shift": config["action_snr_shift"],
@@ -110,12 +117,15 @@ def main():
             raise ValueError("The selected demo latent changed since cache verification")
     spec = settings.get("ig_demo_attention")
     index_spec = settings.get("ig_foresight_indexing")
-    if spec:
-        from demo_attention import spec_for_views
+    from demo_attention import is_latent_spec, latent_spec_for_views, spec_for_views
 
-        if spec != spec_for_views(camera_count(plan, "demo")):
+    latent = is_latent_spec(spec)
+    if spec:
+        if spec != (latent_spec_for_views if latent else spec_for_views)(camera_count(plan, "demo")):
             raise ValueError("Checkpoint demo cameras differ from the preparation plan")
-    if bool(spec) != bool(args.demo_features or args.disable_demo_attention):
+    if latent and args.demo_features:
+        parser.error("A_latent uses the verified VAE cache; omit --demo-features")
+    if not latent and bool(spec) != bool(args.demo_features or args.disable_demo_attention):
         parser.error("For an A checkpoint supply --demo-features, or use --disable-demo-attention")
     demo = None
     if args.demo_features is not None:
@@ -161,6 +171,8 @@ def main():
     rgb, _, state = recording(Path(plan["source_root"]), pair["query"], views=views, record=query_record)
     obs = {"rgb": torch.from_numpy(rgb[:1].copy()).float().div_(255).unsqueeze(0), "state": state[:1]}
     actor.prepare_for_eval(torch.empty(1), obs)
+    if latent and not args.disable_demo_attention:
+        actor.demo_latents = actor.preview_human_latent.to(device=actor.device, dtype=actor.dtype)
     if demo is not None and not args.disable_demo_attention:
         actor.demo_features = demo.to(device=actor.device, dtype=actor.dtype)
     # Checkpoint reconstruction may initialize modules before restoring weights.
@@ -177,7 +189,8 @@ def main():
         "seed": args.seed,
         "control_hz": 50,
         "denoise_steps": args.denoise_steps,
-        "demo_attention": actor.demo_features is not None,
+        "demo_attention": actor.demo_features is not None or actor.demo_latents is not None,
+        "demo_source": "latent" if latent else ("dino" if spec else None),
         "foresight_indexing": index_spec is not None and actor.demo_features is not None,
         "action_representation": "roboicl_world_hand10_absolute",
         "actions": action[0].cpu().tolist(),

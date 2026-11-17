@@ -1165,6 +1165,12 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
 
         indexing = getattr(self, "foresight_indexing", None)
         demo = input_dict.get("demo_features")
+        if getattr(self, "demo_source", None) == "latent":
+            if icl is None:
+                raise ValueError("A_latent requires demonstration video latents")
+            # Reuse the exact video input embedding, before any backbone block.
+            # Never detach: the shared patch embedding follows the video path.
+            demo = icl_hs * input_dict["demo_keep"].to(icl_hs.dtype)
         keys = []
         log_indices = {}
         if indexing is not None and (semantic_ifp is None or demo is None):
@@ -1356,6 +1362,14 @@ class WanICLTransformer3DModel(ModelMixin, ConfigMixin):
         hs_latent = hidden_states if mode == "video" else None
         hs_action = hidden_states if mode == "action" else None
         demo = input_dict.get("demo_features")
+        if getattr(self, "demo_source", None) == "latent" and mode == "action":
+            demo_latents = input_dict.get("demo_latents")
+            if demo_latents is not None:
+                demo, _, _ = self._training_embed(
+                    demo_latents,
+                    demo_latents.new_zeros((demo_latents.shape[0], demo_latents.shape[2])),
+                    "video",
+                )
         indexing = getattr(self, "foresight_indexing", None)
         make_index = mode == "video" and bool(update_cache) and indexing is not None and demo is not None
         read_index = mode == "action" and indexing is not None and demo is not None

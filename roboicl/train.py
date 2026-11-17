@@ -28,6 +28,9 @@ from prepare import (
 
 
 GLOBAL_BATCH = 16
+LATENT_LORA_RANK = 98
+LATENT_PARAMETER_TARGET = 470_597_413  # Existing A+B1+FI, rank 106.
+LATENT_PARAMETER_TOLERANCE = 0.002
 
 
 class FullRoboICLDataset(RoboICLDataset):
@@ -182,7 +185,14 @@ def resume_progress(checkpoint, config, samples_per_epoch):
 
 def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
                    demo_cache=None, demo_dropout=0.3, initialize_from_demo=None,
-                   semantic_cache=None, semantic_weight=0.5, indexing=None):
+                   semantic_cache=None, semantic_weight=0.5, indexing=None, demo_latents=False):
+    if demo_latents and (demo_cache is not None or semantic_cache is not None or indexing is not None):
+        raise ValueError("A_latent requires latent-only demo input without B/FI")
+    data_audit = None
+    if demo_latents:
+        from single_embodiment import audit_plan
+
+        data_audit = audit_plan(plan)
     native_config = training.native_config
     prepare_episode = training.prepare_episode
     atomic_json = training.atomic_json
@@ -199,21 +209,23 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
         semantic_digest = sha256(semantic_cache)
         query_rows, targets, target_valid, semantic_encoder = load_query_features(semantic_cache, work, plan)
         pair_rows = torch.tensor([query_rows[pair["query"]] for pair in plan["pairs"]["train"]])
-    if demo_cache is not None:
+    demo_enabled = demo_cache is not None or demo_latents
+    if demo_enabled:
         from demo_attention import (
-            spec_for_views, add_to_adapter_report, attach_demo_attention, attach_foresight_indexing,
+            spec_for_views, latent_spec_for_views, add_to_adapter_report, attach_demo_attention, attach_foresight_indexing,
         )
         from demo_features import load_features
 
-        spec = spec_for_views(camera_count(plan, "demo"))
-        cache_digest = sha256(demo_cache)
-        feature_ids, features = load_features(demo_cache, work, plan)
-        if semantic_cache is not None:
-            demo_encoder = torch.load(demo_cache, map_location="cpu", weights_only=True, mmap=True)
-            if demo_encoder["encoder_sha256"] != semantic_encoder:
-                raise ValueError("A and B must use the same DINOv2 checkpoint")
-        train_demos = sorted({pair["demo"] for pair in plan["pairs"]["train"]})
-        demo_rows = torch.tensor([feature_ids[episode] for episode in train_demos])
+        spec = (latent_spec_for_views if demo_latents else spec_for_views)(camera_count(plan, "demo"))
+        if demo_cache is not None:
+            cache_digest = sha256(demo_cache)
+            feature_ids, features = load_features(demo_cache, work, plan)
+            if semantic_cache is not None:
+                demo_encoder = torch.load(demo_cache, map_location="cpu", weights_only=True, mmap=True)
+                if demo_encoder["encoder_sha256"] != semantic_encoder:
+                    raise ValueError("A and B must use the same DINOv2 checkpoint")
+            train_demos = sorted({pair["demo"] for pair in plan["pairs"]["train"]})
+            demo_rows = torch.tensor([feature_ids[episode] for episode in train_demos])
 
         def adapt_with_demo(model, config):
             init_path = config.ig_initialization if initialize_from_demo else None
@@ -222,6 +234,19 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
             )
             attach_demo_attention(model, spec)
             add_to_adapter_report(model, report)
+            if demo_latents:
+                actual = sum(p.numel() for p in model.parameters() if p.requires_grad)
+                difference = actual - LATENT_PARAMETER_TARGET
+                report["parameter_budget"] = {
+                    "reference": "A+B1+FI_rank106",
+                    "target": LATENT_PARAMETER_TARGET,
+                    "actual": actual,
+                    "difference": difference,
+                    "relative_difference": difference / LATENT_PARAMETER_TARGET,
+                    "relative_tolerance": LATENT_PARAMETER_TOLERANCE,
+                }
+                if abs(difference) / LATENT_PARAMETER_TARGET > LATENT_PARAMETER_TOLERANCE:
+                    raise ValueError("A_latent trainable parameter count exceeds the 0.2% matching tolerance; check model configuration and LoRA rank")
             a_shapes = report["trainable_shapes"]
             if semantic_cache is not None:
                 retired = ("mcp_blocks.", "mcp_projections.")
@@ -304,10 +329,18 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
         settings.ig_app_config["action_representation"] = ACTION_REPRESENTATION
         settings.ig_roboicl_channels = list(ACTION_CHANNELS)
         settings.ig_roboicl_cache_sha256 = sha256(work / "verified-cache.json")
-        if demo_cache is not None:
+        if demo_enabled:
             settings.ig_demo_attention = spec
-            settings.ig_demo_cache_sha256 = cache_digest
             settings.ig_demo_dropout = demo_dropout
+            if demo_cache is not None:
+                settings.ig_demo_cache_sha256 = cache_digest
+            else:
+                settings.ig_demo_source = "latent"
+                settings.ig_roboicl_encoding = plan["encoding"]
+                settings.ig_single_embodiment_data = data_audit
+                settings.ig_roboicl_video_contract = receipt["contract"]
+                settings.ig_trainable_parameter_target = LATENT_PARAMETER_TARGET
+                settings.ig_trainable_parameter_tolerance = LATENT_PARAMETER_TOLERANCE
         if semantic_cache is not None:
             settings.ig_semantic_ifp = {"schema": DUAL_SCHEMA if views == 2 else SCHEMA, "weight": semantic_weight}
             settings.ig_semantic_ifp_cache_sha256 = semantic_digest
@@ -326,6 +359,13 @@ def install_bridge(work, plan, receipt, max_steps, batch_per_gpu=1, *,
             keep = torch.rand((len(demo), 1, 1), device=demo.device) >= demo_dropout
             # A dropped demo has zero K/V under the bias-free projections.
             inputs["demo_features"] = demo * keep
+        if demo_latents:
+            icl = inputs["icl_latent_dict"]["latent"]
+            inputs["demo_keep"] = torch.rand((len(icl), 1, 1), device=icl.device) >= demo_dropout
+            patch = trainer.transformer.patch_size
+            count = math.prod(size // stride for size, stride in zip(icl.shape[-3:], patch))
+            trainer.ig_latest_shape.update(demo_source="latent", demo_tokens=count,
+                                           demo_token_ratio_vs_dino=count / (32 * camera_count(plan, "demo")))
         if semantic_cache is not None:
             rows = pair_rows[batch["ig_sample_index"].cpu()]
             frames = batch["latents"].shape[2]
@@ -385,13 +425,16 @@ def main():
     parser.add_argument("--epochs", required=True, type=int)
     parser.add_argument("--warmup-steps", default=10, type=int)
     parser.add_argument("--learning-rate", default=1e-4, type=float)
+    parser.add_argument("--lora-rank", type=int, help="LoRA rank: default 98 for A_latent, 106 otherwise")
     parser.add_argument("--seed", default=1, type=int)
     parser.add_argument("--num-workers", default=2, type=int)
     parser.add_argument("--max-steps", type=int)
     parser.add_argument("--save-epoch-freq", type=int, default=1)
     parser.add_argument("--resume-from", type=Path)
     parser.add_argument("--initialize-from", type=Path, help="Warm-start from a baseline, A, or (for indexing) A+B1 adapter")
-    parser.add_argument("--demo-features", type=Path, help="Enable A using the precomputed DINOv2 cache")
+    demo_input = parser.add_mutually_exclusive_group()
+    demo_input.add_argument("--demo-features", type=Path, help="Enable A using the precomputed DINOv2 cache")
+    demo_input.add_argument("--demo-latents", action="store_true", help="A_latent: read video input demo patches, without B/FI")
     parser.add_argument("--demo-dropout", type=float, default=0.3)
     parser.add_argument("--semantic-features", type=Path, help="Replace latent MCP with B1 query DINO targets")
     parser.add_argument("--semantic-weight", type=float, default=0.5)
@@ -399,6 +442,9 @@ def main():
     parser.add_argument("--key-weight", type=float, default=0.5, help="Weight of the foresight key loss")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
+    lora_rank = args.lora_rank if args.lora_rank is not None else (LATENT_LORA_RANK if args.demo_latents else 106)
+    if lora_rank < 1:
+        parser.error("--lora-rank must be positive")
     world = int(os.environ.get("WORLD_SIZE", "1"))
     if args.batch_per_gpu < 1:
         parser.error("--batch-per-gpu must be positive")
@@ -412,6 +458,10 @@ def main():
         parser.error("--max-steps must be positive")
     if not 0 <= args.demo_dropout < 1:
         parser.error("--demo-dropout must be in [0, 1)")
+    if args.demo_latents and (args.semantic_features or args.foresight_indexing):
+        parser.error("--demo-latents is an A-only ablation; omit semantic foresight and indexing")
+    if args.demo_latents and args.initialize_from and args.resume_from:
+        parser.error("Choose --initialize-from or --resume-from")
     if args.semantic_features and not args.demo_features:
         parser.error("--semantic-features requires --demo-features for A+B")
     if not math.isfinite(args.semantic_weight) or args.semantic_weight <= 0:
@@ -432,6 +482,7 @@ def main():
         parser.error("need at least 16 training pairs")
     demo_cache = args.demo_features.resolve() if args.demo_features else None
     semantic_cache = args.semantic_features.resolve() if args.semantic_features else None
+    demo_enabled = demo_cache is not None or args.demo_latents
     initialize_from_demo = None
     checkpoint_path = args.resume_from or args.initialize_from
     if checkpoint_path is not None:
@@ -443,8 +494,11 @@ def main():
             parser.error("Checkpoint uses a different RoboICL cache or base model")
         checkpoint_has_demo = "ig_demo_attention" in previous
         checkpoint_has_semantic = "ig_semantic_ifp" in previous
+        if previous.get("ig_lora_rank") != lora_rank:
+            parser.error("Checkpoint LoRA rank differs; start A_latent rank 98 from the base pretrain, or resume a matching-rank checkpoint")
         if args.resume_from and (
-            checkpoint_has_demo != (demo_cache is not None)
+            checkpoint_has_demo != demo_enabled
+            or (args.demo_latents != (previous.get("ig_demo_source") == "latent"))
             or checkpoint_has_semantic != (semantic_cache is not None)
             or previous.get("ig_foresight_indexing") != indexing
         ):
@@ -454,11 +508,12 @@ def main():
         ):
             parser.error("Use --resume-from to continue an A+B1 or indexed checkpoint")
         if args.initialize_from and checkpoint_has_demo:
-            from demo_attention import spec_for_views
+            from demo_attention import spec_for_views, latent_spec_for_views
 
-            if (demo_cache is None or previous["ig_demo_attention"] != spec_for_views(camera_count(plan, "demo"))
-                    or previous["ig_demo_cache_sha256"] != sha256(demo_cache)):
-                parser.error("Warm-start requires the same demo architecture and feature cache")
+            expected_spec = (latent_spec_for_views if args.demo_latents else spec_for_views)(camera_count(plan, "demo"))
+            if (not demo_enabled or previous["ig_demo_attention"] != expected_spec
+                    or (demo_cache is not None and previous.get("ig_demo_cache_sha256") != sha256(demo_cache))):
+                parser.error("Warm-start requires the same demo architecture and feature cache; use the common baseline for A_latent")
             initialize_from_demo = "A"
             if checkpoint_has_semantic:
                 if previous["ig_semantic_ifp_cache_sha256"] != sha256(semantic_cache):
@@ -466,7 +521,7 @@ def main():
                 initialize_from_demo = "A+B1"
         del checkpoint
     install_bridge(work, plan, receipt, args.max_steps, args.batch_per_gpu,
-                   demo_cache=demo_cache, demo_dropout=args.demo_dropout,
+                   demo_cache=demo_cache, demo_dropout=args.demo_dropout, demo_latents=args.demo_latents,
                    initialize_from_demo=initialize_from_demo, indexing=indexing,
                    semantic_cache=semantic_cache, semantic_weight=args.semantic_weight)
     training.run(RoboICLConfig(
@@ -478,6 +533,7 @@ def main():
         batch_size=1, effective_batch_size=world,
         total_epochs=args.epochs, warmup_steps=args.warmup_steps, save_epoch_freq=args.save_epoch_freq,
         learning_rate=args.learning_rate, seed=args.seed, num_workers=args.num_workers,
+        adapter_rank=lora_rank,
         activation_checkpointing=True,
         resume_from=str(args.resume_from.resolve()) if args.resume_from else None,
         initialize_from=str(args.initialize_from.resolve()) if args.initialize_from else None,

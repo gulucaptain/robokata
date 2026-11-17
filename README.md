@@ -1,5 +1,16 @@
 # RoboKata mixed 25k
 
+## A_latent reading ablation
+
+Training, resume, Hugging Face epoch publication and checkpoint inference for
+**A_latent** are documented in [the A_latent guide](docs/ABLATION-A-LATENT.md).
+This variant starts from Zero-WAM pretrain, uses 21,860 Franka-only pairs, retains
+original MCP, and disables semantic foresight and indexing. The recipe is
+20 epochs, batch 16 per GPU on four GPUs, LoRA rank 98, LR 1e-4 and warmup 100.
+Weights: [gulucaptain/RoboKata-A-latent-21860](https://huggingface.co/gulucaptain/RoboKata-A-latent-21860).
+
+The existing DINO A+B1+FI and pi05 baseline entry points remain available below.
+
 **11.11 training release.** Epoch weights are published to
 [gulucaptain/RoboKata-1111](https://huggingface.co/gulucaptain/RoboKata-1111).
 For checkpoint download and evaluation commands, see

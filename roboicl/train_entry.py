@@ -14,6 +14,7 @@ from examples.baselines.zero_wam.zero_wam.wan_va.distributed import util
 def configure_cuda_pool(target_gib):
     native_config = training.native_config
     init_distributed = util.init_distributed
+    resume = training.resume
     gib = 1024**3
 
     def native_config_with_pool(config, manifest):
@@ -21,12 +22,10 @@ def configure_cuda_pool(target_gib):
         settings.ig_cuda_cache_floor_gib = target_gib
         return settings
 
-    def init_with_pool(world_size, local_rank, rank):
-        init_distributed(world_size, local_rank, rank)
-        device = torch.device("cuda", local_rank)
+    def reserve_pool(device, rank, stage):
         free, _ = torch.cuda.mem_get_info(device)
         extra = max(0, target_gib * gib - torch.cuda.memory_reserved(device))
-        ready = torch.tensor(int(free >= extra + gib), device=device)
+        ready = torch.tensor(int(not extra or free >= extra + gib), device=device)
         dist.all_reduce(ready, op=dist.ReduceOp.MIN)
         if not ready.item():
             raise RuntimeError("Insufficient memory for the requested CUDA cache on a rank")
@@ -36,10 +35,21 @@ def configure_cuda_pool(target_gib):
         torch.cuda.synchronize(device)
         torch.cuda.reset_peak_memory_stats(device)
         reserved = torch.cuda.memory_reserved(device) / gib
-        print(f"Rank {rank}: CUDA pool reserved {reserved:.2f} GiB for reuse", flush=True)
+        print(f"Rank {rank}: CUDA pool reserved {reserved:.2f} GiB for reuse ({stage})", flush=True)
+
+    def init_with_pool(world_size, local_rank, rank):
+        init_distributed(world_size, local_rank, rank)
+        reserve_pool(torch.device("cuda", local_rank), rank, "distributed initialization")
+
+    def resume_with_pool(trainer):
+        resume(trainer)
+        # Loading libraries may clear unused cache. Restore the floor after
+        # model/optimizer construction, immediately before training starts.
+        reserve_pool(trainer.device, trainer.config.rank, "model ready")
 
     training.native_config = native_config_with_pool
     util.init_distributed = init_with_pool
+    training.resume = resume_with_pool
 
 
 def main():

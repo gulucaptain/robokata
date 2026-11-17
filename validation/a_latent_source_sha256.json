@@ -1,0 +1,21 @@
+{
+  "verified_date": "2026-11-17",
+  "scope": "Core training/inference code and isolated epoch publisher match the running source; reusable launch wrappers are supplied separately.",
+  "files": {
+    "roboicl/train.py": "b8ad3a1f955d98a9ffbbeb0bcf05c6968ecfbd5fb29b0edbbc5bc5a25c501004",
+    "roboicl/train_entry.py": "8203321b8879d2b136cf5b8668c2d6765697f6f605ebba57fb1927deb2f00eb9",
+    "roboicl/demo_attention.py": "52739772027dacd95d35b36a0c61ad1d7a9b785798bbc075f98ee36e681f884d",
+    "roboicl/infer_checkpoint.py": "998b6bacb1af9696e13aedf141fc42c0566cfab51d05b3b7595f0d60efda7554",
+    "roboicl/single_embodiment.py": "2f3b3502f56e79950bae9ef43e963d35dad92d036777030cdadef2e37ec549ff",
+    "roboicl/prepare.py": "beb377dda962e9e03d55dac356782b0f15b5a92289ba034ca3b88f5b44000d4c",
+    "backend/examples/baselines/zero_wam/zero_wam/training.py": "4c71d259afc0fce1035c72237d36198ca411fb464824a920a30d3253ed20e31b",
+    "backend/examples/baselines/zero_wam/zero_wam/lora.py": "66f6695a7389e3efaa16b9abdf8f5fe4e0bb5738f68be834ce2ad8b8a97f1c7e",
+    "backend/examples/baselines/zero_wam/zero_wam/dataset.py": "b1346b770cc9d4899e67f9b9c46c5f755304512d6013c55596434cb4825126ea",
+    "backend/examples/baselines/zero_wam/zero_wam/runtime.py": "5a496135e1c9eb8f794bd55dd5545458a2c943f4fa3149d16496f272849ae0b0",
+    "backend/examples/baselines/zero_wam/zero_wam/config.py": "547caaa9a7c401cd1c53ce91e956e22306e4b403130ad448e0adc1d33e8752b5",
+    "backend/examples/baselines/zero_wam/zero_wam/policy.py": "aaddc06525576cfea8f68629e697843a89328fab785c3e0eb3bb2f2bc8ecae61",
+    "backend/examples/baselines/zero_wam/zero_wam/wan_va/train.py": "e4d4d206936b48bab6355ea95ea2e5e02a0382d3cb8ddd6d7d8b9650e54a3fbb",
+    "backend/examples/baselines/zero_wam/zero_wam/wan_va/modules/icl_model.py": "63f42f6bc1a14325aa9ac357102578b0eb47232682018c2585e950d414c3fad9",
+    "roboicl/publish_epochs.py": "ed910451964f508edd5c5726940970b25aa4452d2abbdbd38f9cf0e87772ff78"
+  }
+}

@@ -19,14 +19,22 @@ def spec_for_views(views):
     return {**SPEC, "feature_schema": DUAL_SCHEMA} if views == 2 else SPEC
 
 
+def latent_spec_for_views(views):
+    return {**SPEC, "feature_schema": "video_input_patch_tokens_v1", "views": views}
+
+
+def is_latent_spec(spec):
+    return bool(spec) and spec.get("feature_schema") == "video_input_patch_tokens_v1"
+
+
 class DemoAttention(nn.Module):
-    def __init__(self, action_dim, width, heads, views=1):
+    def __init__(self, action_dim, width, heads, views=1, input_dim=None):
         super().__init__()
         self.heads = heads
         self.views = views
         self.norm = nn.LayerNorm(action_dim)
         self.query = nn.Linear(action_dim, width, bias=False)
-        self.key_value = nn.Linear(feature_shape(views)[1], 2 * width, bias=False)
+        self.key_value = nn.Linear(input_dim or feature_shape(views)[1], 2 * width, bias=False)
         self.out = nn.Linear(width, action_dim, bias=False)
         # FSDP2 requires every managed parameter to have a sharding dimension.
         self.gate = nn.Parameter(torch.zeros(1))
@@ -53,14 +61,20 @@ class DemoAttention(nn.Module):
 
 
 def attach_demo_attention(model, spec):
-    if spec not in (SPEC, spec_for_views(2)):
+    latent = is_latent_spec(spec)
+    allowed = (SPEC, spec_for_views(2), latent_spec_for_views(1), latent_spec_for_views(2))
+    if spec not in allowed:
         raise ValueError(f"Unsupported Robot-ICL + A architecture: {spec}")
     if not getattr(model, "supports_demo_attention", False):
         raise RuntimeError("Apply demo_attention.patch to the isolated IG checkout")
-    views = 2 if spec["feature_schema"] == DUAL_SCHEMA else 1
+    views = spec["views"] if latent else (2 if spec["feature_schema"] == DUAL_SCHEMA else 1)
+    model.demo_source = "latent" if latent else "dino"
     for index in spec["layers"]:
         block = model.blocks[index]
-        block.demo_attention = DemoAttention(model.action_inner_dim, spec["width"], spec["heads"], views)
+        block.demo_attention = DemoAttention(
+            model.action_inner_dim, spec["width"], spec["heads"], views,
+            input_dim=model.inner_dim if latent else None,
+        )
 
 
 def add_to_adapter_report(model, report):
@@ -75,6 +89,8 @@ def add_to_adapter_report(model, report):
 
 
 def attach_foresight_indexing(model, schema, *, query_views=None):
+    if getattr(model, "demo_source", None) == "latent":
+        raise ValueError("A_latent does not support foresight indexing")
     from examples.baselines.zero_wam.zero_wam.wan_va.foresight_indexing import (
         KEY_LAYERS, SCHEMA as INDEX_SCHEMA, ForesightIndexing,
     )

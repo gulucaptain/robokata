@@ -1,0 +1,30 @@
+{
+  "experiment": "A_latent_franka21860_pretrain",
+  "work": "/data/haoyuzhao/envs/video/zero-wam-ig10k/cache/roboicl-full-v1",
+  "plan_sha256": "9218a390ea2a6e627f81ceef58f8fc0006ffa7171bea85115241312aac397ca1",
+  "model": "/data/haoyuzhao/envs/video/zero-wam-ig10k/weights/zero-wam-pretrain",
+  "empty_text": "/home/zhaohaoyu/code/zero-wam-ig10k/Zero-WAM/wan_va/assets/empty_text_emb.pt",
+  "initialization": "zero_wam_pretrain",
+  "world_size": 4,
+  "batch_per_gpu": 16,
+  "epochs": 20,
+  "updates_per_epoch": 330,
+  "total_updates": 6600,
+  "lora_rank": 98,
+  "trainable_parameters": 471342625,
+  "parameter_target": 470597413,
+  "learning_rate": 0.0001,
+  "warmup_steps": 100,
+  "seed": 1,
+  "demo_dropout": 0.3,
+  "demo_resize_hw": [
+    320,
+    480
+  ],
+  "query_resize_hw": [
+    224,
+    288
+  ],
+  "hf_repo": "gulucaptain/RoboKata-A-latent-21860",
+  "cuda_cache_floor_gib": 120
+}
